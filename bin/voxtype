@@ -16,6 +16,7 @@ VOXTYPE_VERSION="0.1.0"
 STATE_DIR="${VOXTYPE_STATE_DIR:-$HOME/.cache/voxtype}"
 WAV="$STATE_DIR/rec.wav"
 PIDFILE="$STATE_DIR/rec.pid"
+LOGFILE="$STATE_DIR/hs.log"
 
 # WhisperKit's on-disk layout is always <root>/models/argmaxinc/whisperkit-coreml/
 # openai_whisper-<variant>, so discover it instead of pinning a path that shifts
@@ -420,7 +421,15 @@ cmd_doctor() {
 
     if [ -f "$HS_MODULE" ]; then
         if grep -q "voxtype" "$HS_CONFIG" 2>/dev/null; then
-            check "voxtype hotkeys loaded" ok ""
+            local loaded
+            loaded=$(grep -a 'hotkeys loaded' "$LOGFILE" 2>/dev/null | tail -1 \
+                     | sed -E 's/.*hotkeys loaded ([0-9T:-]+).*/\1/')
+            if [ -n "$loaded" ]; then
+                check "voxtype hotkeys loaded" ok "at $loaded"
+            else
+                check "voxtype hotkeys loaded" no "no load marker in $LOGFILE - open -a Hammerspoon"
+                failures=$((failures + 1))
+            fi
         else
             check "voxtype hotkeys loaded" no "add 'require(\"voxtype\")' to $HS_CONFIG"; failures=$((failures + 1))
         fi

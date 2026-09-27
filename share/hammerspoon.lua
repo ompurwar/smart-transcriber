@@ -31,3 +31,14 @@ hs.hotkey.bind({ "ctrl", "alt" }, "delete", function() fire("cancel") end)
 hs.hotkey.bind({ "ctrl", "alt" }, "R", function() fire("restart") end)
 
 log.i("loaded - ctrl+opt+V dictation, ctrl+opt+delete cancel, ctrl+opt+R restart")
+
+-- Leave a timestamped marker so the installer can wait for the hotkeys to be
+-- genuinely live, and `voxtype doctor` can tell "Hammerspoon is running" apart
+-- from "the hotkeys actually loaded".
+do
+  local f = io.open(LOG, "a")
+  if f then
+    f:write(string.format("=== hotkeys loaded %s ===\n", os.date("%Y-%m-%dT%H:%M:%S")))
+    f:close()
+  end
+end

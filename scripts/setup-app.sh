@@ -51,17 +51,35 @@ setup_hammerspoon() {
 
     ok "hotkeys installed"
 
-    # Make sure Hammerspoon is up and has reloaded the new config.
+    # Make sure Hammerspoon is up and has reloaded the new config. A fixed sleep
+    # here was not enough: the hotkeys were sometimes still dead seconds after a
+    # fresh install, so wait for the module's own load marker instead.
     if pgrep -x Hammerspoon >/dev/null 2>&1; then
         osascript -e 'tell application "Hammerspoon" to quit' >/dev/null 2>&1 || true
         sleep 1
     fi
     open -a Hammerspoon 2>/dev/null || warn "could not launch Hammerspoon"
-    sleep 2
+
+    local marker="$HOME/.cache/voxtype/hs.log"
+    local loaded=0
+    for _ in $(seq 1 30); do
+        if [ -f "$marker" ] && grep -aq 'hotkeys loaded' "$marker" 2>/dev/null; then
+            loaded=1
+            break
+        fi
+        sleep 1
+    done
+
     if pgrep -x Hammerspoon >/dev/null 2>&1; then
         ok "hammerspoon running"
     else
         warn "hammerspoon is not running. Launch it from Spotlight."
+    fi
+
+    if [ "$loaded" = "1" ]; then
+        ok "ctrl+opt+V is live"
+    else
+        warn "the hotkeys did not report as loaded. Check $marker, then open -a Hammerspoon."
     fi
 }
 
