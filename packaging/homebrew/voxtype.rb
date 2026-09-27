@@ -1,9 +1,9 @@
 class Voxtype < Formula
   desc "Hold-to-talk voice typing for macOS with on-device Whisper and a local LLM"
   homepage "https://github.com/ompurwar/smart-transcriber"
-  url "https://github.com/ompurwar/smart-transcriber/archive/refs/tags/v0.1.3.tar.gz"
+  url "https://github.com/ompurwar/smart-transcriber/archive/refs/tags/v0.1.4.tar.gz"
   # The version is scanned from the URL, so it is not spelled out here.
-  sha256 "cb5cb09a2e1e988046867cd598819fe35b424734a904803964646964a3a83a08"
+  sha256 "4b6781f707254b332d4b53707b28ab38d5866377d3ecaaf3804d80fbf2f90cc9"
   license "MIT"
 
   depends_on "sox"
