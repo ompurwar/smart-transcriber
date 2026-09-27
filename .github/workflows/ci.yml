@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: brew install shellcheck
+
+      - name: Lint
+        run: shellcheck -S warning install.sh bin/voxtype scripts/lib/common.sh scripts/setup-ollama.sh scripts/setup-app.sh tests/test-voxtype.sh
+
+      - name: Syntax check
+        run: |
+          for f in install.sh bin/voxtype scripts/lib/common.sh scripts/setup-ollama.sh scripts/setup-app.sh tests/test-voxtype.sh; do
+            bash -n "$f"
+          done
+
+      - name: Unit tests
+        run: bash tests/test-voxtype.sh
+
+      - name: Dry run the installer
+        run: bash install.sh --dry-run --no-models
+
+  formula:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the formula is syntactically valid
+        run: ruby -c packaging/homebrew/voxtype.rb

@@ -1,0 +1,11 @@
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Never commit real recordings or transcripts
+*.wav
+*.aiff
+cache/
+state/

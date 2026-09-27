@@ -1,0 +1,595 @@
+#!/bin/bash
+# voxtype - hold-to-talk voice typing for macOS.
+#
+# Records from the default microphone, transcribes on-device with WhisperKit,
+# and rewrites the transcript with a local Ollama model. Nothing is uploaded.
+#
+#   voxtype doctor        check that everything is installed and working
+#   voxtype install-hint  print the two macOS permission steps
+#   voxtype config        show resolved settings
+#   voxtype status        report recording state
+
+set -uo pipefail
+
+VOXTYPE_VERSION="0.1.0"
+
+STATE_DIR="${VOXTYPE_STATE_DIR:-$HOME/.cache/voxtype}"
+WAV="$STATE_DIR/rec.wav"
+PIDFILE="$STATE_DIR/rec.pid"
+
+# WhisperKit's on-disk layout is always <root>/models/argmaxinc/whisperkit-coreml/
+# openai_whisper-<variant>, so discover it instead of pinning a path that shifts
+# between CLI releases.
+WHISPER_VARIANT="${VOXTYPE_WHISPER_MODEL:-small.en}"
+WHISPER_CACHE="${VOXTYPE_WHISPER_CACHE:-$HOME/.cache/whisperkit}"
+
+OLLAMA_URL="${VOXTYPE_OLLAMA_URL:-http://localhost:11434/api/generate}"
+OLLAMA_MODEL="${VOXTYPE_OLLAMA_MODEL:-qwen2.5:3b}"
+OLLAMA_TIMEOUT="${VOXTYPE_OLLAMA_TIMEOUT:-90}"
+LANGUAGE="${VOXTYPE_LANGUAGE:-en}"
+PASTE="${VOXTYPE_NO_PASTE:-0}"
+
+HS_DIR="$HOME/.hammerspoon"
+HS_CONFIG="$HS_DIR/init.lua"
+HS_MODULE="$HS_DIR/voxtype.lua"
+
+mkdir -p "$STATE_DIR" 2>/dev/null
+
+die() { echo "voxtype: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+find_model_dir() {
+    local d
+    d=$(ls -d "$WHISPER_CACHE"/models/argmaxinc/whisperkit-coreml/\
+openai_whisper-"$WHISPER_VARIANT" 2>/dev/null | head -1)
+    [ -n "$d" ] && [ -d "$d" ] || return 1
+    printf '%s' "$d"
+}
+
+model_dir() {
+    # An explicit override always wins.
+    if [ -n "${VOXTYPE_MODEL_DIR:-}" ]; then printf '%s' "$VOXTYPE_MODEL_DIR"; return 0; fi
+    find_model_dir 2>/dev/null && return 0
+    return 1
+}
+
+# ---------------------------------------------------------------- state
+
+is_recording() {
+    [ -f "$PIDFILE" ] || return 1
+    local pid
+    pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+    [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+beep() { osascript -e 'beep' >/dev/null 2>&1 || true; }
+hud() { osascript -e "display notification \"$1\" with title \"voxtype\"" >/dev/null 2>&1 || true; }
+
+# ---------------------------------------------------------------- commands
+
+cmd_status() {
+    if is_recording; then
+        echo "recording (pid $(cat "$PIDFILE"))"
+    else
+        echo "idle"
+    fi
+}
+
+cmd_cancel() {
+    if is_recording; then
+        local pid
+        pid=$(cat "$PIDFILE")
+        kill "$pid" 2>/dev/null
+        sleep 0.3
+        kill -9 "$pid" 2>/dev/null
+        rm -f "$PIDFILE" "$WAV"
+        hud "cancelled"
+        echo "cancelled"
+    else
+        echo "idle"
+    fi
+}
+
+cmd_start() {
+    is_recording && die "already recording (use 'voxtype toggle')"
+    have rec || die "sox is not installed - run: brew install sox"
+
+    rm -f "$WAV" "$PIDFILE"
+
+    # sox's `rec` captures from the default input until interrupted. Detach stdio
+    # and disown: the caller (Hammerspoon) may exit and close our pipes, which
+    # would otherwise kill the recorder with SIGPIPE.
+    rec -q -c 1 -t wav "$WAV" >/dev/null 2>&1 &
+    local pid=$!
+    disown "$pid" 2>/dev/null
+    echo "$pid" > "$PIDFILE"
+
+    # If sox dies immediately (mic permission denied), do not pretend we are
+    # recording.
+    sleep 0.35
+    if ! kill -0 "$pid" 2>/dev/null; then
+        rm -f "$PIDFILE"
+        die "recorder exited immediately - run 'voxtype install-hint' to grant microphone access"
+    fi
+
+    beep
+    hud "recording…"
+    echo "recording"
+}
+
+cmd_stop() {
+    is_recording || die "not recording"
+
+    local pid
+    pid=$(cat "$PIDFILE")
+
+    # SIGINT lets sox finalise the RIFF header; without it the wav is unreadable.
+    kill -INT "$pid" 2>/dev/null
+    for _ in $(seq 1 40); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill -9 "$pid" 2>/dev/null
+    rm -f "$PIDFILE"
+
+    [ -s "$WAV" ] || die "recording was empty"
+
+    hud "transcribing…"
+    local raw
+    raw=$(transcribe "$WAV")
+    raw=$(strip_tags "$raw")
+
+    if [ -z "${raw//[[:space:]]/}" ]; then
+        rm -f "$WAV"
+        hud "nothing heard"
+        echo ""
+        return 0
+    fi
+
+    hud "cleaning up…"
+    local clean
+    clean=$(reformat "$raw")
+
+    rm -f "$WAV"
+    printf '%s' "$clean"
+    printf '\n'
+}
+
+# Copy the finished text to the clipboard and paste into whatever app was
+# frontmost when dictation started. The keystroke needs Accessibility, which
+# macOS attributes to the parent app (Hammerspoon) rather than to us.
+paste_into_frontmost() {
+    local text="$1"
+    [ -n "${text//[[:space:]]/}" ] || { hud "nothing heard"; return 0; }
+    # The hotkey path captures this function's stdout, so log the text or a
+    # failing dictation leaves nothing to diagnose.
+    printf 'pasted: %s\n' "${text:0:200}" >> "$STATE_DIR/hs.log"
+    printf '%s' "$text" | pbcopy
+    [ "$PASTE" = "1" ] && return 0
+    sleep 0.3
+    if ! osascript -e 'tell application "System Events" to keystroke "v" using command down' >/dev/null 2>&1; then
+        hud "paste blocked - text is on the clipboard"
+    fi
+}
+
+# The hotkey path: one command for both halves of the toggle, so the caller does
+# not have to know the current state.
+cmd_hotkey() {
+    if is_recording; then
+        local text
+        text=$(cmd_stop) || exit $?
+        paste_into_frontmost "$text"
+    else
+        cmd_start
+    fi
+}
+
+cmd_restart() {
+    cmd_cancel
+    sleep 0.4
+    cmd_start
+}
+
+# ---------------------------------------------------------------- stages
+
+transcribe() {
+    local wav="$1"
+    if ! have whisperkit-cli; then
+        echo "voxtype: whisperkit-cli is not installed - run: brew install whisperkit-cli" >&2
+        return 1
+    fi
+
+    local args
+    if local_dir=$(model_dir); then
+        args=(--model-path "$local_dir" --audio-path "$wav")
+    else
+        # Not downloaded yet: let WhisperKit fetch it into its own cache.
+        args=(--model "$WHISPER_VARIANT" --audio-path "$wav")
+    fi
+    [ -n "$LANGUAGE" ] && args+=(--language "$LANGUAGE")
+    whisperkit-cli transcribe "${args[@]}" 2>/dev/null
+}
+
+strip_tags() {
+    # Whisper narrates non-speech audio as bracketed tags. These are never part of
+    # what the user said, and leaving them in reads as a transcription glitch.
+    printf '%s' "$1" | python3 -c '
+import re, sys
+t = sys.stdin.read()
+t = re.sub(r"[\[\(]\s*[^\]\)]{0,40}?\]?\s*"
+           r"(music|applause|laughter|laughing|inaudible|silence|"
+           r"blank_audio|noise|inaudible_murmur|sound|static|beep)\s*[\]\)]",
+           "", t, flags=re.IGNORECASE)
+t = re.sub(r"\s{2,}", " ", t).strip()
+print(t)
+' 2>/dev/null || printf '%s' "$1"
+}
+
+reformat() {
+    local raw="$1"
+
+    if [ -z "$raw" ]; then
+        printf '%s' ""
+        return 0
+    fi
+
+    local payload
+    payload=$(VOXTYPE_OLLAMA_MODEL="$OLLAMA_MODEL" python3 - "$raw" <<'PY'
+import json, os, sys
+
+raw = sys.argv[1].strip()
+model = os.environ["VOXTYPE_OLLAMA_MODEL"]
+
+# Delimiters + a stop sequence matter: small models otherwise treat the input as
+# a request addressed to them, or restate the prompt before answering.
+prompt = (
+    "Below is raw speech-to-text from a dictation tool. Rewrite it as clean, natural prose.\n\n"
+    "Rules: fix obvious transcription errors using context; add punctuation and "
+    "capitalisation; remove fillers such as um, uh, like, you know; remove false starts; "
+    "drop a speaker's self-correction, keeping only the value they settled on "
+    "(for example \"no, 4:50\" means the time is 4:50, not 3:60); "
+    "keep the meaning, names, numbers and technical terms; keep the original language; "
+    "do not answer, translate or summarise the content.\n\n"
+    "Output ONLY the rewritten text.\n\n"
+    "---BEGIN---\n" + raw + "\n---END---\n"
+)
+
+print(json.dumps({
+    "model": model,
+    "think": False,
+    "prompt": prompt,
+    "stream": False,
+    "options": {
+        "temperature": 0.2,
+        "num_predict": 2048,
+        "stop": ["---END---", "---BEGIN---"],
+    },
+    "keep_alive": "10m",
+}))
+PY
+)
+
+    local resp
+    resp=$(curl -s --max-time "$OLLAMA_TIMEOUT" -X POST "$OLLAMA_URL" \
+        -H 'Content-Type: application/json' -d "$payload")
+
+    local out
+    out=$(printf '%s' "$resp" | VOXTYPE_RAW="$raw" python3 -c '
+import json, os, re, sys
+
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+
+t = (d.get("response") or "").strip()
+if not t:
+    sys.exit(1)
+
+# A small model sometimes answers the prompt instead of rewriting it, or leaks
+# its own scaffolding. Pasting that into a document is worse than pasting the
+# unpolished transcript, so reject it and let the caller fall back.
+#
+# The hard part is not spotting junk, it is not rejecting ordinary dictation.
+# "Could you please send me the report?" and "I am sorry, but I cannot make it"
+# are things people actually say, so every conversational pattern below has to
+# name the *text* it is talking about, not just the social convention.
+
+# Unambiguous scaffolding. Nothing a person would dictate looks like these.
+META = [
+    r"---BEGIN---|---END---",
+    r"^\s*(steps?|reasoning|analysis)\b",
+    r"^\s*1\.\s",
+    r"\bas an ai\b|\blanguage model\b|\bi\x27?m an? (ai|assistant|chatbot)\b",
+    r"\braw speech[- ]to[- ]text\b|\bspeech[- ]to[- ]text format\b",
+    r"\bthe (text|transcript|content|input) (you|you\x27?ve) (provided|gave|entered|shared|written|pasted)\b",
+    r"\bhere(\x27s| is) the (cleaned|rewritten|revised|corrected|formatted|polished)\b",
+    r"^\s*(rewritten|cleaned|corrected|revised) (text|version|transcript)\s*:",
+    r"^\s*sure[,!.]?\s*(here|below)\b",
+    r"\byour (rewritten|cleaned|corrected) (text|version)\b",
+]
+
+# Conversational shapes that only count as junk when the model is asking for the
+# input back rather than dictating it to somebody.
+META_IF_ABOUT_TEXT = [
+    r"\b(could|can|would) you (please )?(provide|send|share|paste|give|supply|re-?send)\b"
+    r"[^\n.?!]{0,40}?\b(text|transcript|content|input|words|audio|recording)\b",
+    r"\bplease (provide|send|share|paste|supply|re-?send)\b"
+    r"[^\n.?!]{0,40}?\b(text|transcript|content|input|words|audio|recording)\b",
+    r"\bwould you like (me to )?(re-?write|re-?phrase|clean|edit|process|"
+    r"translate|summari[sz]e|fix|change)\b",
+    r"\bi (can\x27?t|cannot|am unable to) (help|assist|re-?write|re-?phrase|"
+    r"clean|edit|process|translate|summari[sz]e)\b",
+    r"\bi (apologi[sz]e|am sorry|regret)\b[^.?!]{0,60}\b"
+    r"(text|transcript|content|input|prompt|instructions?)\b",
+]
+for pat in META:
+    if re.search(pat, t, re.IGNORECASE | re.MULTILINE):
+        sys.exit(1)
+
+for pat in META_IF_ABOUT_TEXT:
+    if re.search(pat, t, re.IGNORECASE | re.MULTILINE):
+        sys.exit(1)
+
+# Runaway generation that ignored the stop sequence.
+if len(t) > max(200, 20 * len(os.environ.get("VOXTYPE_RAW", ""))):
+    sys.exit(1)
+
+print(t)
+' 2>/dev/null)
+
+    if [ -n "$out" ]; then
+        printf '%s' "$out"
+    else
+        # Ollama down or failed: the raw transcript is still useful.
+        printf '%s' "$raw"
+    fi
+}
+
+# ---------------------------------------------------------------- diagnostics
+
+cmd_config() {
+    local dir
+    dir=$(model_dir 2>/dev/null) || dir="(not downloaded yet)"
+    cat <<EOF
+version     : $VOXTYPE_VERSION
+whisper     : $WHISPER_VARIANT
+model dir   : $dir
+ollama url  : $OLLAMA_URL
+ollama model: $OLLAMA_MODEL
+timeout     : ${OLLAMA_TIMEOUT}s
+language    : ${LANGUAGE:-auto}
+state dir   : $STATE_DIR
+EOF
+}
+
+check() {
+    local label="$1" ok="$2" hint="$3"
+    if [ "$ok" = "ok" ]; then
+        printf '  \033[32mok\033[0m    %s\n' "$label"
+    else
+        printf '  \033[31mMISS\033[0m  %s\n        %s\n' "$label" "$hint"
+    fi
+}
+
+cmd_doctor() {
+    local failures=0
+    echo "voxtype $VOXTYPE_VERSION doctor"
+    echo
+    echo "dependencies"
+
+    if have sox || have rec; then check "sox (audio capture)" ok ""; else
+        check "sox (audio capture)" no "brew install sox"; failures=$((failures + 1)); fi
+
+    if have whisperkit-cli; then check "whisperkit-cli (transcription)" ok ""; else
+        check "whisperkit-cli (transcription)" no "brew install whisperkit-cli"; failures=$((failures + 1)); fi
+
+    if have ollama; then check "ollama (local LLM)" ok ""; else
+        check "ollama (local LLM)" no "brew install --cask ollama"; failures=$((failures + 1)); fi
+
+    if [ -d "/Applications/Hammerspoon.app" ]; then check "hammerspoon (hotkeys)" ok ""; else
+        check "hammerspoon (hotkeys)" no "brew install --cask hammerspoon"; failures=$((failures + 1)); fi
+
+    if have python3; then check "python3 (rewrite guard)" ok ""; else
+        check "python3 (rewrite guard)" no "install Xcode Command Line Tools"; failures=$((failures + 1)); fi
+
+    echo
+    echo "models"
+
+    if model_dir >/dev/null 2>&1; then
+        check "whisper '$WHISPER_VARIANT'" ok ""
+    else
+        check "whisper '$WHISPER_VARIANT'" no "run: voxtype warmup"; failures=$((failures + 1))
+    fi
+
+    if ollama list 2>/dev/null | awk '{print $1}' | grep -qx "$OLLAMA_MODEL"; then
+        check "ollama model '$OLLAMA_MODEL'" ok ""
+    else
+        check "ollama model '$OLLAMA_MODEL'" no "ollama pull $OLLAMA_MODEL"; failures=$((failures + 1))
+    fi
+
+    echo
+    echo "hotkeys"
+
+    if pgrep -x Hammerspoon >/dev/null 2>&1; then
+        check "hammerspoon running" ok ""
+    else
+        check "hammerspoon running" no "open -a Hammerspoon"; failures=$((failures + 1))
+    fi
+
+    if [ -f "$HS_MODULE" ]; then
+        if grep -q "voxtype" "$HS_CONFIG" 2>/dev/null; then
+            check "voxtype hotkeys loaded" ok ""
+        else
+            check "voxtype hotkeys loaded" no "add 'require(\"voxtype\")' to $HS_CONFIG"; failures=$((failures + 1))
+        fi
+    else
+        check "voxtype hotkeys loaded" no "run: voxtype install-hammerspoon"; failures=$((failures + 1))
+    fi
+
+    echo
+    echo "permissions (cannot be granted by a script)"
+    echo "  run 'voxtype install-hint' for the two manual macOS steps"
+
+    echo
+    if [ "$failures" -eq 0 ]; then
+        echo "all automated checks passed"
+    else
+        echo "$failures check(s) need attention"
+    fi
+    return 0
+}
+
+# Fetches the whisper model into the cache. Used by the installer so the first
+# real dictation is not also a multi-hundred-megabyte download.
+cmd_warmup() {
+    have whisperkit-cli || die "whisperkit-cli is not installed - run: brew install whisperkit-cli"
+    local wav="$STATE_DIR/warmup.wav"
+    say -v Samantha "smart transcriber warm up" --data-format=LEI16@22050 --file-format=WAVE -o "$wav" 2>/dev/null \
+        || die "could not synthesise a warmup clip"
+    echo "downloading whisper '$WHISPER_VARIANT' (this happens once)…"
+    whisperkit-cli transcribe --model "$WHISPER_VARIANT" --audio-path "$wav" >/dev/null 2>&1
+    rm -f "$wav"
+    if model_dir >/dev/null 2>&1; then
+        echo "model ready at $(model_dir)"
+    else
+        die "download did not produce a model directory"
+    fi
+}
+
+cmd_install_hint() {
+    cat <<'EOF'
+voxtype needs two macOS permissions. Only you can grant these, because macOS
+requires a human to click the button.
+
+1. MICROPHONE
+   System Settings > Privacy & Security > Microphone
+   Turn on Hammerspoon.
+   (sox records as a child of Hammerspoon, so this is the app that needs access.)
+
+2. ACCESSIBILITY
+   System Settings > Privacy & Security > Accessibility
+   Turn on Hammerspoon.
+   (voxtype sends a paste keystroke, which is an accessibility action.)
+
+After granting both, run:  voxtype doctor
+EOF
+}
+
+cmd_install_hammerspoon() {
+    local src="$VOXTYPE_SHARE_DIR/hammerspoon.lua"
+    [ -f "$src" ] || die "cannot find hammerspoon.lua (set VOXTYPE_SHARE_DIR)"
+
+    mkdir -p "$HS_DIR"
+
+    # Bake in this script's real location so the hotkeys keep working when voxtype
+    # was installed somewhere other than ~/.local/bin.
+    local self_dir self_base
+    self_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
+    self_base=$(basename "$0")
+    local rendered="$STATE_DIR/hammerspoon.rendered.lua"
+    python3 - "$src" "$rendered" "$self_dir/$self_base" <<'PY'
+import pathlib, re, sys
+src, dest, binary = sys.argv[1], sys.argv[2], sys.argv[3]
+text = pathlib.Path(src).read_text()
+new, n = re.subn(
+    r'^local VOXTYPE = .*$',
+    'local VOXTYPE = os.getenv("VOXTYPE_BIN") or "%s"' % binary,
+    text, count=1, flags=re.M)
+if n != 1:
+    sys.exit("could not rewrite the VOXTYPE path in %s" % src)
+pathlib.Path(dest).write_text(new)
+PY
+    [ -f "$rendered" ] || die "could not render the Hammerspoon module"
+
+    if [ -f "$HS_MODULE" ] && cmp -s "$rendered" "$HS_MODULE"; then
+        echo "voxtype hotkeys already up to date"
+    else
+        cp "$rendered" "$HS_MODULE"
+        echo "wrote $HS_MODULE"
+    fi
+    rm -f "$rendered"
+
+    if [ ! -f "$HS_CONFIG" ]; then
+        printf 'require("voxtype")\n' > "$HS_CONFIG"
+        echo "wrote $HS_CONFIG"
+    elif grep -q 'require("voxtype")' "$HS_CONFIG"; then
+        echo "$HS_CONFIG already loads voxtype"
+    else
+        local backup="$HS_CONFIG.voxtype-backup"
+        [ -f "$backup" ] || cp "$HS_CONFIG" "$backup"
+        printf 'require("voxtype")\n\n%s' "$(cat "$HS_CONFIG")" > "$HS_CONFIG"
+        echo "added voxtype to $HS_CONFIG (previous version saved as $backup)"
+    fi
+}
+
+cmd_help() {
+    cat <<EOF
+voxtype $VOXTYPE_VERSION - hold-to-talk voice typing for macOS
+
+usage: voxtype <command>
+
+  hotkey        start/stop dictation and paste the result (what the hotkey calls)
+  start         begin recording
+  stop          stop, transcribe, clean up, print the text
+  toggle        start if idle, otherwise stop
+  cancel        discard the recording in progress
+  restart       cancel, then start again
+  status        report recording state
+  config        show resolved settings
+  doctor        check the install and report what is missing
+  warmup        pre-download the whisper model
+  install-hint  print the two macOS permission steps
+  install-hammerspoon
+                (re)install the hotkey config
+  rewrite        clean a raw transcript read from stdin. Useful for tuning
+                VOXTYPE_OLLAMA_MODEL without recording anything.
+  help          this text
+
+hotkeys (via Hammerspoon)
+  ctrl+opt+V            start / stop dictation
+  ctrl+opt+delete       cancel
+  ctrl+opt+R            restart recording
+
+environment
+  VOXTYPE_LANGUAGE        speech language, default en (empty = auto)
+  VOXTYPE_WHISPER_MODEL   whisper variant, default small.en
+  VOXTYPE_OLLAMA_MODEL    rewrite model, default qwen2.5:3b
+  VOXTYPE_OLLAMA_URL      ollama endpoint, default http://localhost:11434/api/generate
+  VOXTYPE_OLLAMA_TIMEOUT  rewrite timeout in seconds, default 90
+  VOXTYPE_MODEL_DIR       override the discovered whisper model directory
+  VOXTYPE_NO_PASTE        set to 1 to print instead of pasting
+  VOXTYPE_STATE_DIR       runtime state, default ~/.cache/voxtype
+EOF
+}
+
+# ---------------------------------------------------------------- dispatch
+
+case "${1:-help}" in
+    start)            cmd_start ;;
+    stop)             cmd_stop ;;
+    hotkey)           cmd_hotkey ;;
+    toggle)
+        if is_recording; then cmd_stop; else cmd_start; fi
+        ;;
+    cancel)           cmd_cancel ;;
+    restart)          cmd_restart ;;
+    status)           cmd_status ;;
+    config)           cmd_config ;;
+    doctor)           cmd_doctor ;;
+    warmup)           cmd_warmup ;;
+    install-hint)     cmd_install_hint ;;
+    install-hammerspoon) cmd_install_hammerspoon ;;
+    rewrite)
+        reformat "$(strip_tags "$(cat)")"
+        printf '\n'
+        ;;
+    help|-h|--help)   cmd_help ;;
+    version|--version) echo "$VOXTYPE_VERSION" ;;
+    *)
+        echo "voxtype: unknown command '${1}'" >&2
+        echo "try: voxtype help" >&2
+        exit 2
+        ;;
+esac
