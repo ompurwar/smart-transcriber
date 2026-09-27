@@ -495,13 +495,13 @@ echo "language models"
 cfg() { bash "$VOXTYPE" config; }
 contains "en picks the English-only whisper"  "whisper     : small.en"     "$(VOXTYPE_LANGUAGE=en cfg)"
 contains "en picks the small fast rewriter"   "ollama model: qwen2.5:1.5b" "$(VOXTYPE_LANGUAGE=en cfg)"
-contains "hi picks the multilingual whisper"  "whisper     : small"        "$(VOXTYPE_LANGUAGE=hi cfg)"
+contains "hi picks the multilingual whisper"  "whisper     : medium"       "$(VOXTYPE_LANGUAGE=hi cfg)"
 contains "hi picks the bigger rewriter"       "ollama model: qwen2.5:7b"   "$(VOXTYPE_LANGUAGE=hi cfg)"
 contains "en-US is still English"             "whisper     : small.en"     "$(VOXTYPE_LANGUAGE=en-US cfg)"
 # An empty value means auto-detect, which must not be turned into English: the
 # English-only pair cannot transcribe what auto-detect might find.
 contains "empty language means auto-detect"   "language    : auto"         "$(VOXTYPE_LANGUAGE='' cfg)"
-contains "auto-detect uses multilingual"      "whisper     : small"        "$(VOXTYPE_LANGUAGE='' cfg)"
+contains "auto-detect uses multilingual"      "whisper     : medium"       "$(VOXTYPE_LANGUAGE='' cfg)"
 contains "an explicit whisper still wins"     "whisper     : medium"       "$(VOXTYPE_LANGUAGE=hi VOXTYPE_WHISPER_MODEL=medium cfg)"
 contains "an explicit rewriter still wins"    "ollama model: llama3.1:8b"  "$(VOXTYPE_LANGUAGE=hi VOXTYPE_OLLAMA_MODEL=llama3.1:8b cfg)"
 

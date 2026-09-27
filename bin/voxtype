@@ -99,7 +99,16 @@ if [ -n "${VOXTYPE_WHISPER_MODEL:-}" ]; then
 elif is_english; then
     WHISPER_VARIANT="small.en"
 else
-    WHISPER_VARIANT="small"
+    # medium, not small. Measured on real recordings from this machine, the
+    # difference is not marginal: on one of them small produced "और वहान लगागा
+    # वादा है और स्विएड़ा है बवाँदवाई" where medium produced "Hey what's
+    # happening? Is everything fine?", and on a Hindi sentence small invented
+    # "नमस्ति ... यक खाम ... ख्रिप्या ... द्धन्यवाद" where medium returned the words.
+    # It is also deterministic where small re-decodes at a higher temperature and
+    # returns something different each run. It costs roughly three times the
+    # transcription time -- 5.7s against 2.0s for a fourteen second clip -- which
+    # is the right trade for a transcript that is actually the words spoken.
+    WHISPER_VARIANT="medium"
 fi
 
 # qwen2.5:7b rather than qwen3:4b for the non-English rewriter, which is not the
@@ -1290,7 +1299,7 @@ cmd_doctor() {
     elif [ "$WHISPER_VARIANT" = "small.en" ] || [ "$WHISPER_VARIANT" = "base.en" ] \
          || [ "$WHISPER_VARIANT" = "tiny.en" ] || [ "$WHISPER_VARIANT" = "medium.en" ]; then
         check "whisper matches language '$LANGUAGE'" no \
-            "'$WHISPER_VARIANT' is English-only but the language is '$LANGUAGE'. Unset VOXTYPE_WHISPER_MODEL to get 'small', or pick a multilingual variant"
+            "'$WHISPER_VARIANT' is English-only but the language is '$LANGUAGE'. Unset VOXTYPE_WHISPER_MODEL to get 'medium', or pick a multilingual variant"
         failures=$((failures + 1))
     else
         check "whisper matches language '$LANGUAGE'" ok ""

@@ -106,7 +106,7 @@ Everything is environment variables, so you can set them in your shell profile.
 | --- | --- | --- |
 | `VOXTYPE_LANGUAGE` | `en` | `hi`, `mr` … ; set empty for auto-detect |
 | `VOXTYPE_SCRIPT` | `auto` | `roman` or `native`; see [languages](#languages) |
-| `VOXTYPE_WHISPER_MODEL` | follows the language | `small.en` for English, `small` for anything else |
+| `VOXTYPE_WHISPER_MODEL` | follows the language | `small.en` for English, `medium` for anything else |
 | `VOXTYPE_OLLAMA_MODEL` | follows the language | `qwen2.5:1.5b` for English, `qwen2.5:7b` for anything else |
 | `VOXTYPE_OLLAMA_URL` | `http://localhost:11434/api/generate` | point at a remote box if you like |
 | `VOXTYPE_OLLAMA_TIMEOUT` | `90` | seconds before falling back to the raw transcript |
@@ -134,9 +134,9 @@ the language:
 | `VOXTYPE_LANGUAGE` | whisper | rewriter |
 | --- | --- | --- |
 | `en` (default) | `small.en` | `qwen2.5:1.5b` |
-| anything else, or empty (auto) | `small` | `qwen2.5:7b` |
+| anything else, or empty (auto) | `medium` | `qwen2.5:7b` |
 
-Hindi and its neighbours get Hinglish. `small` transcribes the speech
+Hindi and its neighbours get Hinglish. `medium` transcribes the speech
 correctly, and its Latin letters are produced by a transliterator built into
 `voxtype` rather than by the model (see below), so the rewriter only has to
 tidy up text that is already in the script you asked for:
