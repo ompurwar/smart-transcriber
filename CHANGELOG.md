@@ -49,6 +49,13 @@
   canvas and reading the glyph rows back with `imageFromCanvas`; the label and
   the clock both land dead on the midline. Menlo, used for the clock's digits,
   sits 2px higher in its frame than the system font and gets its own nudge.
+- The recording stage now always draws the waveform. A recording needs about a
+  third of a second of audio before a bar can be measured, and the renderer
+  fell back to the three pulsing dots for that gap, so the transcribing
+  animation showed up at the start of every recording.
+- The newest waveform bar was never drawn: the bars were collected with a
+  zero-based index, which left the first one outside the array part of the
+  table, so only 23 of the 24 reached the renderer.
 - The overlay used to hide itself in the middle of any dictation longer than
   45 seconds. The stage timestamp is written once, when the recording starts,
   and it was being treated as a deadline; a two-minute recording lost its

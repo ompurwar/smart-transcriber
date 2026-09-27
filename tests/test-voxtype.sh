@@ -676,6 +676,30 @@ else
 fi
 
 echo
+echo "overlay waveform"
+# A recording has to draw the waveform from its first frame. A recording needs a
+# third of a second of audio before a bar can be measured, and the renderer used
+# to fall back to the three pulsing dots for that gap, so the transcribing
+# animation appeared during a recording.
+if grep -q '^      if stage == "recording" then$' "$ROOT/share/hammerspoon.lua"; then
+    ok "recording always draws the waveform, never the dots"
+else
+    bad "recording always draws the waveform, never the dots" "the waveform branch is not gated on the stage"
+fi
+if grep -q 'local v = levels and levels\[i + 1\] or 0' "$ROOT/share/hammerspoon.lua"; then
+    ok "a missing level draws a short bar instead of a dot"
+else
+    bad "a missing level draws a short bar instead of a dot" "levels is assumed to be present"
+fi
+# Indexing the bars from zero left out[0] outside the array part, so #levels was
+# 23 and the newest bar never reached the renderer.
+if grep -q 'out\[bar + 1\] = peak' "$ROOT/share/hammerspoon.lua"; then
+    ok "the bars are collected 1-based so none are dropped"
+else
+    bad "the bars are collected 1-based so none are dropped" "read_levels indexes from zero"
+fi
+
+echo
 echo "incomplete model"
 # An interrupted download leaves the model directory behind with only part of
 # the CoreML bundles, and every transcription then fails to load it. A directory

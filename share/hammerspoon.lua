@@ -321,7 +321,10 @@ do
             if v > peak then peak = v end
           end
         end
-        out[bar] = peak
+        -- 1-based on purpose. Indexing from zero left out[0], the newest slice,
+        -- outside the array part: #levels came back as 23, and the renderer,
+        -- which reads levels[i + 1], never saw the newest bar at all.
+        out[bar + 1] = peak
       end
       return out
     end
@@ -475,16 +478,21 @@ do
         }
       end
 
-      if levels then
-        -- Scrolling waveform: newest on the right, history moving left, which is
-        -- how every other waveform the user has seen behaves. levels[1] is the
-        -- newest slice, so it is placed at the last bar, not the first. Drawing
-        -- it at the first bar made the waveform scroll the wrong way and was a
-        -- mismatch with the comment that had always claimed this.
+      if stage == "recording" then
+        -- The waveform, always, even before there is enough audio in the file to
+        -- measure. A recording needs a third of a second of sound before a bar
+        -- can be computed, and falling back to the indeterminate dots for that
+        -- gap showed the *transcribing* animation during a recording, which
+        -- reads as the wrong stage entirely. Short bars for a moment is the
+        -- honest picture: nothing has been said yet.
+        --
+        -- Scrolling left, newest on the right, which is how every other waveform
+        -- the user has seen behaves. levels[1] is the newest slice, so it goes at
+        -- the last bar, not the first.
         local pitch = WAV_W / BARS
         local width = pitch * 0.65
         for i = 0, BARS - 1 do
-          local v = levels[i + 1] or 0
+          local v = levels and levels[i + 1] or 0
           els[#els + 1] = bar_elements(WAV_X + (BARS - 1 - i) * pitch, CY,
                                         MAX_H, pitch, width, spec.dot, v, 4)
         end
