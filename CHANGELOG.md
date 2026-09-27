@@ -49,6 +49,13 @@
   canvas and reading the glyph rows back with `imageFromCanvas`; the label and
   the clock both land dead on the midline. Menlo, used for the clock's digits,
   sits 2px higher in its frame than the system font and gets its own nudge.
+- The pill reacts on the key press instead of a moment later. The stage was
+  published after a 350ms liveness sleep and two `osascript` spawns (the beep
+  and the notification), so starting felt sluggish; measured with real sox it
+  went from 887ms to 55ms between the key and the pill. Stopping was the same
+  story in reverse -- the stage was published after the wait for sox to close
+  the file -- and went from 278ms to 55ms. The cosmetic calls are now background
+  and the liveness check runs out of band.
 - The recording stage now always draws the waveform. A recording needs about a
   third of a second of audio before a bar can be measured, and the renderer
   fell back to the three pulsing dots for that gap, so the transcribing

@@ -250,11 +250,19 @@ cmd_cancel() {
         local pid
         pid=$(cat "$PIDFILE")
         kill "$pid" 2>/dev/null
-        sleep 0.3
-        kill -9 "$pid" 2>/dev/null
-        rm -f "$PIDFILE" "$WAV"
-        hud "cancelled"
+        rm -f "$PIDFILE"
+        # Published before waiting on sox, so cancelling feels like it took
+        # effect on the press rather than a moment later.
         ui_state cancelled ""
+        { hud "cancelled"; } &
+        # The wait is short and has to stay in the foreground: it is what stops
+        # a restart from starting a new recording on top of the old one's file.
+        for _ in $(seq 1 60); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.05
+        done
+        kill -9 "$pid" 2>/dev/null
+        rm -f "$WAV"
         echo "cancelled"
     else
         echo "idle"
@@ -275,17 +283,33 @@ cmd_start() {
     disown "$pid" 2>/dev/null
     echo "$pid" > "$PIDFILE"
 
-    # If sox dies immediately (mic permission denied), do not pretend we are
-    # recording.
-    sleep 0.35
-    if ! kill -0 "$pid" 2>/dev/null; then
-        rm -f "$PIDFILE"
-        die "recorder exited immediately - run 'voxtype install-hint' to grant microphone access"
-    fi
-
-    beep
-    hud "recording…"
+    # Publish the stage before anything else. Everything below costs time the
+    # user can feel: the liveness check sleeps, and each hud() spawns an
+    # osascript. Publishing first is what makes the pill appear on the press
+    # rather than a third of a second later.
     ui_state recording "$WAV"
+
+    # Cosmetic, so it must not be waited on. Left in the foreground these two
+    # osascripts alone were several hundred milliseconds of delay between the
+    # key and the pill.
+    { beep; hud "recording…"; } &
+
+    # If sox dies immediately (mic permission denied), do not pretend we are
+    # recording. Done in the background so the caller returns at once and the
+    # hotkey lock is not held through the sleep.
+    {
+        sleep 0.35
+        if ! kill -0 "$pid" 2>/dev/null; then
+            # Only clean up if that recording is still the current one. A cancel
+            # and restart inside this third of a second would otherwise have its
+            # own pidfile and state deleted by this late check.
+            if [ "$(cat "$PIDFILE" 2>/dev/null)" = "$pid" ]; then
+                rm -f "$PIDFILE" "$UI_STATE"
+                hud "recorder stopped immediately - check microphone access"
+            fi
+        fi
+    } &
+
     echo "recording"
 }
 
@@ -297,31 +321,38 @@ cmd_stop() {
 
     # SIGINT lets sox finalise the RIFF header; without it the wav is unreadable.
     kill -INT "$pid" 2>/dev/null
-    for _ in $(seq 1 40); do
+
+    # Say what is happening before waiting for sox to finish closing the file.
+    # That wait is a poll loop, and the pill should not sit on "recording" while
+    # it runs.
+    ui_state transcribing "$WAV"
+
+    # 50ms rather than 100ms: the process is normally gone almost at once, and
+    # this is time in front of the transcription starting.
+    for _ in $(seq 1 80); do
         kill -0 "$pid" 2>/dev/null || break
-        sleep 0.1
+        sleep 0.05
     done
     kill -9 "$pid" 2>/dev/null
     rm -f "$PIDFILE"
 
     [ -s "$WAV" ] || { ui_state empty ""; die "recording was empty"; }
 
-    hud "transcribing…"
-    ui_state transcribing "$WAV"
+    { hud "transcribing…"; } &
     local raw
     raw=$(transcribe "$WAV")
     raw=$(strip_tags "$raw")
 
     if [ -z "${raw//[[:space:]]/}" ]; then
         rm -f "$WAV"
-        hud "nothing heard"
+        { hud "nothing heard"; } &
         ui_state empty ""
         echo ""
         return 0
     fi
 
-    hud "cleaning up…"
     ui_state polishing "$WAV"
+    { hud "cleaning up…"; } &
     local clean
     clean=$(reformat "$raw")
 
