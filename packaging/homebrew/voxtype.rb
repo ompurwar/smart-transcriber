@@ -30,24 +30,34 @@ class Voxtype < Formula
 
   def caveats
     <<~EOS
-      voxtype needs a global hotkey, so it installs a Hammerspoon module:
+      This formula installs the voxtype command and its Hammerspoon module, and
+      nothing else. Four steps are left, and they are in this order because each
+      one needs the previous:
 
-        brew install --cask hammerspoon
-        voxtype install-hammerspoon
+        1. brew install ollama
+           ollama serve &
 
-      Then start Hammerspoon and grant it Microphone and Accessibility
-      access in System Settings > Privacy & Security. See:
+        2. brew install --cask hammerspoon
+           voxtype install-hammerspoon
 
-        https://github.com/ompurwar/smart-transcriber#two-permissions-you-have-to-click
+        3. ollama pull qwen2.5:1.5b
+           voxtype warmup
 
-      Pull the local rewrite model once:
+        4. Start Hammerspoon, then grant it Microphone and Accessibility access
+           in System Settings > Privacy & Security. macOS will not let a script
+           do this, so it is the one step that has to be clicked:
 
-        ollama pull qwen2.5:1.5b
-        voxtype warmup
+             https://github.com/ompurwar/smart-transcriber#two-permissions-you-have-to-click
 
       Check the install at any time:
 
         voxtype doctor
+
+      If you would rather have all of the above done for you, the standalone
+      installer does every step on this list in one command, and is what the
+      README recommends:
+
+        curl -fsSL https://raw.githubusercontent.com/ompurwar/smart-transcriber/main/install.sh | bash
     EOS
   end
 

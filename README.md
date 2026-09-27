@@ -29,15 +29,21 @@ curl -fsSL https://raw.githubusercontent.com/ompurwar/smart-transcriber/main/ins
 ```
 
 The installer pulls in `sox`, `whisperkit-cli`, Ollama and Hammerspoon, downloads
-both models, wires up the hotkeys, and sets Hammerspoon to start on login.
+both models, wires up the hotkeys, sets Hammerspoon to start on login, and gives
+you `voxtype uninstall`. It is the recommended path because it is the only one
+that does all of that for you.
 
-Prefer Homebrew:
+Also on Homebrew, if you would rather manage it with `brew`:
 
 ```bash
 brew install ompurwar/tap/voxtype
-brew install --cask hammerspoon
-voxtype install-hammerspoon
 ```
+
+The formula installs the command and its module, and nothing else, so there are
+four steps left. They are listed in order when it finishes, and `brew info
+ompurwar/tap/voxtype` shows the same list at any time. In short: install Ollama
+and the Hammerspoon cask, run `voxtype install-hammerspoon`, `ollama pull
+qwen2.5:1.5b`, then grant the two permissions below.
 
 Preview the installer without touching your machine:
 
