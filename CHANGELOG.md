@@ -49,6 +49,14 @@
   canvas and reading the glyph rows back with `imageFromCanvas`; the label and
   the clock both land dead on the midline. Menlo, used for the clock's digits,
   sits 2px higher in its frame than the system font and gets its own nudge.
+- The overlay used to hide itself in the middle of any dictation longer than
+  45 seconds. The stage timestamp is written once, when the recording starts,
+  and it was being treated as a deadline; a two-minute recording lost its
+  overlay a minute in. A recording is now judged alive by its wav file, which
+  sox appends to continuously, rather than by its age.
+- The overlay also survives its state file being removed. It falls back to the
+  recorder's own wav, so a deleted `ui.state` no longer hides the overlay while
+  a recording is running, and the clock is recovered from the file's length.
 - The pill's end insets are settable (`VOXTYPE_PAD_L`, `VOXTYPE_PAD_R`) and the
   left one is a little wider than the right, which is what stops the dot's side
   looking tighter than the clock's.

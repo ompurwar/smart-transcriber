@@ -84,7 +84,27 @@ end
 -- no rectangle()/fillColor() drawing methods and no hs.window.new().
 do
     local built, build_err = pcall(function()
-    local UI_STATE = HOME .. "/.cache/voxtype/ui.state"
+    local STATE_DIR = os.getenv("VOXTYPE_STATE_DIR")
+    if not STATE_DIR or STATE_DIR == "" then
+      STATE_DIR = HOME .. "/.cache/voxtype"
+    end
+    local UI_STATE = STATE_DIR .. "/ui.state"
+    local REC_WAV = STATE_DIR .. "/rec.wav"
+
+    -- How recently the recorder's wav must have been written to count as live.
+    -- sox appends continuously, so anything older than a couple of ticks means
+    -- the recorder is gone.
+    local LIVE_WITHIN = 2
+
+    -- Seconds since the file's contents last changed, or nil if it is not there.
+    -- This is how a recording is known to be alive, and it costs a stat rather
+    -- than a subprocess, which matters at twelve calls a second.
+    local function wav_age(path)
+      if not (hs.fs and hs.fs.attributes) then return nil end
+      local mod = hs.fs.attributes(path, "modification")
+      if type(mod) ~= "number" then return nil end
+      return os.time() - mod
+    end
 
     -- The Hammerspoon console is the only place log.e goes, and nobody has it
     -- open, so overlay failures are appended to the same log file the installer
@@ -306,10 +326,24 @@ do
       return out
     end
 
+    -- How much has been recorded so far, read back from the file itself. Only
+    -- needed when the stage file vanished and the start time went with it; the
+    -- normal path counts up from the epoch the recorder published.
+    local function wav_seconds(path)
+      local h = header_for(path)
+      if not h then return nil end
+      local f = io.open(path, "rb")
+      if not f then return nil end
+      local size = f:seek("end")
+      f:close()
+      local bytes = size - (h.off - 1)
+      if bytes <= 0 then return nil end
+      return bytes / (h.rate * h.ch * h.bps)
+    end
+
     -- A quiet microphone would otherwise render a flat line, so the scale
     -- follows the loudest recent sound and decays slowly back down.
-    local gain = 0.05
-    local function auto_gain(levels)
+    local gain = 0.05    local function auto_gain(levels)
       local loudest = 0
       for _, v in ipairs(levels) do
         if v > loudest then loudest = v end
@@ -511,14 +545,40 @@ do
       end
 
       if not stage or stage == "" then
-        hide() current, since, expired = nil, 0, false return
+        -- ui.state is the normal source, but it is a single file that anything
+        -- can remove, and losing the overlay in the middle of a dictation is
+        -- worse than this extra check. Fall back to the recorder's own output:
+        -- sox writes to it continuously, so a wav touched in the last couple of
+        -- seconds means a recording is running, whatever the state file says.
+        local age = wav_age(REC_WAV)
+        if age and age <= LIVE_WITHIN then
+          stage, epoch, wav = "recording", nil, REC_WAV
+        else
+          hide() current, since, expired = nil, 0, false return
+        end
       end
       if not STAGE[stage] then
         hide() current, since, expired = nil, 0, false return
       end
 
       local now = os.time()
-      if epoch and (now - epoch) > STALE_AFTER then
+      if stage == "recording" then
+        -- A recording runs for as long as the user talks, so its start time
+        -- cannot be what decides whether it is still alive: the timestamp is
+        -- written once, and treating that as a deadline hid the overlay in the
+        -- middle of anything longer than STALE_AFTER. The file is the heartbeat
+        -- instead: if sox is still appending to it, the recording is live.
+        local age = (wav and wav ~= "") and wav_age(wav) or nil
+        if age then
+          if age > STALE_AFTER then
+            hide() current, since, expired = nil, 0, false return
+          end
+        elseif epoch and (now - epoch) > STALE_AFTER then
+          -- No file to judge by, so fall back to the deadline rather than
+          -- leaving the overlay up for ever.
+          hide() current, since, expired = nil, 0, false return
+        end
+      elseif epoch and (now - epoch) > STALE_AFTER then
         hide() current, since, expired = nil, 0, false return
       end
 
@@ -547,7 +607,15 @@ do
       end
 
       local elapsed = nil
-      if stage == "recording" and epoch then elapsed = now - epoch end
+      if stage == "recording" then
+        if epoch then
+          elapsed = now - epoch
+        elseif wav and wav ~= "" then
+          -- Recovered from the fallback, so there is no start time to count
+          -- from and the file's own length is the only honest answer.
+          elapsed = wav_seconds(wav)
+        end
+      end
 
       local ok, err = pcall(render, stage, levels, elapsed)
       if not ok then
