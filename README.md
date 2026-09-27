@@ -86,6 +86,7 @@ actually running, so it stays out of the way the rest of the time. See
 | `voxtype config` | show resolved model paths and settings |
 | `voxtype status` | report whether a recording is in progress |
 | `voxtype warmup` | pre-download the whisper model |
+| `voxtype config set KEY=VALUE` | store a setting so the hotkey sees it |
 | `voxtype overlay` | show or change the overlay's size and look |
 | `voxtype install-hint` | print the permission steps again |
 
@@ -162,6 +163,31 @@ thinking flag says) and burns over a thousand tokens doing so; `qwen2.5:7b`
 hands the Devanagari straight back; and `qwen2.5:1.5b` translates the words into
 English. A table has none of those failure modes and cannot mistranslate, and it
 is instant.
+
+### Setting things without a shell profile
+
+`VOXTYPE_LANGUAGE` and friends can be exported in your shell profile, and that
+works when you type `voxtype`. It does **not** work for the hotkey: Hammerspoon
+is started by launchd and never reads your profile, so the dictation it runs
+never sees it. That is the usual reason a setting looks ignored.
+
+Write settings to a file instead:
+
+```bash
+voxtype config set LANGUAGE=hi        # takes effect on the next hotkey press
+voxtype config                        # show what is in effect and where from
+```
+
+They are stored in `~/.config/voxtype/config` and read on every run. An
+environment variable still wins, so a one-off override in the terminal is
+unaffected.
+
+> **Dictating in anything but English?** Set the language first. The default is
+> English with `small.en`, an English-only model, and it does not fail loudly
+> for other languages — it forces the sounds into English words. Hindi speech
+> comes back as plausible-looking nonsense like *"I can't use the model language
+> because it is a bit of an issue"*. `voxtype config set LANGUAGE=hi` switches
+> to the multilingual pair.
 
 ### The overlay
 

@@ -84,9 +84,18 @@ end
 -- no rectangle()/fillColor() drawing methods and no hs.window.new().
 do
     local built, build_err = pcall(function()
+    -- The environment wins only if it points somewhere real. A stale
+    -- VOXTYPE_STATE_DIR is worse than none: it silently moves the overlay to a
+    -- directory the binary may not be using, or to a temp directory macOS is
+    -- free to delete, and the symptom is an overlay that simply never appears.
     local STATE_DIR = os.getenv("VOXTYPE_STATE_DIR")
     if not STATE_DIR or STATE_DIR == "" then
       STATE_DIR = HOME .. "/.cache/voxtype"
+    elseif hs.fs and hs.fs.attributes then
+      local a = hs.fs.attributes(STATE_DIR, "mode")
+      if a ~= "directory" then
+        STATE_DIR = HOME .. "/.cache/voxtype"
+      end
     end
     local UI_STATE = STATE_DIR .. "/ui.state"
     local REC_WAV = STATE_DIR .. "/rec.wav"

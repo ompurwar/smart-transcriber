@@ -17,6 +17,40 @@ set -uo pipefail
 # running straight out of a clone with neither installer.
 VOXTYPE_VERSION="0.1.0"
 
+# Settings on disk, because the hotkey path is run by Hammerspoon and launchd
+# starts it with an environment that has nothing to do with your shell profile.
+# A variable exported in ~/.zshrc works when you type `voxtype` and does nothing
+# at all for the hotkey, which is both surprising and the usual reason a setting
+# appears to be ignored.
+#
+# Environment variables still win, so a one-off override is unaffected.
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/voxtype"
+CONFIG_FILE="$CONFIG_DIR/config"
+CONFIG_KEYS="VOXTYPE_LANGUAGE VOXTYPE_SCRIPT VOXTYPE_WHISPER_MODEL
+VOXTYPE_OLLAMA_MODEL VOXTYPE_OLLAMA_URL VOXTYPE_OLLAMA_TIMEOUT
+VOXTYPE_MODEL_DIR VOXTYPE_NO_PASTE VOXTYPE_STATE_DIR"
+
+load_config() {
+    [ -f "$CONFIG_FILE" ] || return 0
+    local line key value
+    while IFS= read -r line; do
+        case "$line" in ''|'#'*) continue ;; esac
+        key="${line%%=*}"
+        value="${line#*=}"
+        # Only our own names, so a stray line cannot export something else.
+        case "$key" in
+            VOXTYPE_[A-Z_][A-Z0-9_]*) ;;
+            *) continue ;;
+        esac
+        # Anything already in the environment was set deliberately for this
+        # invocation, so it wins.
+        [ -n "$(printenv "$key" 2>/dev/null)" ] && continue
+        # export takes the value literally; no word splitting, no execution.
+        export "$key=$value"
+    done < "$CONFIG_FILE"
+}
+load_config
+
 STATE_DIR="${VOXTYPE_STATE_DIR:-$HOME/.cache/voxtype}"
 WAV="$STATE_DIR/rec.wav"
 PIDFILE="$STATE_DIR/rec.pid"
@@ -342,6 +376,7 @@ cmd_stop() {
     local raw
     raw=$(transcribe "$WAV")
     raw=$(strip_tags "$raw")
+    raw=$(collapse_repeats "$raw")
 
     if [ -z "${raw//[[:space:]]/}" ]; then
         rm -f "$WAV"
@@ -416,6 +451,19 @@ transcribe() {
         args=(--model "$WHISPER_VARIANT" --audio-path "$wav")
     fi
     [ -n "$LANGUAGE" ] && args+=(--language "$LANGUAGE")
+    # Whisper's own guard against a decoder loop, passed explicitly because
+    # whisperkit-cli leaves these thresholds unset, so the library default (or
+    # nothing at all) decides. Repetitive output gzips very well -- a transcript
+    # that looped on "I want the results in the form of an email" scored 3.81
+    # against the usual 2.4, while ordinary sentences score 0.8 to 1.2 -- so
+    # exceeding the threshold marks the segment as a failed decode and the
+    # decoder retries at a higher temperature instead of emitting the loop.
+    #
+    # Only this one. --logprob-threshold -1.0 looks like the companion guard but
+    # silences the transcription completely here: WhisperKit does not score the
+    # same way OpenAI's implementation does, so the value that is the documented
+    # default there rejects everything here. Measured, not assumed.
+    args+=(--compression-ratio-threshold 2.4)
     # No --prompt here for the Roman case. A Roman-script prompt was tried to
     # bias whisper away from Devanagari and it made no difference at all: the
     # output stayed in Devanagari either way, so the transliteration happens
@@ -435,6 +483,86 @@ t = re.sub(r"[\[\(]\s*[^\]\)]{0,40}?\]?\s*"
            "", t, flags=re.IGNORECASE)
 t = re.sub(r"\s{2,}", " ", t).strip()
 print(t)
+' 2>/dev/null || printf '%s' "$1"
+}
+
+# Collapse what whisper repeats when its decoder gets stuck.
+#
+# Whisper locks onto a phrase and emits it until the segment ends, and the text
+# that comes out is not speech, it is the decoder failing. Neither model fixes
+# it: qwen2.5:1.5b reads the repetition as content and copies it straight
+# through, measured on a transcript that said "I want the results in the form of
+# an email" five times and came back unchanged. So it is done here, on the raw
+# transcript, which also means the fallback path (ollama down, guard rejected
+# the rewrite) cannot paste a loop either.
+#
+# Deliberately conservative. Only runs of three or more, because a deliberate
+# double is common and the rewriter already collapses those, and only whole
+# sentences or runs of three or more words, so "no no no" survives as emphasis.
+collapse_repeats() {
+    printf '%s' "$1" | python3 -c '
+import re, sys
+
+
+def _norm(tok):
+    # \x27 rather than a literal apostrophe, so this can sit inside the shell
+    # single quotes above without any escaping games.
+    return re.sub(r"[^\w\x27]", "", tok).lower()
+
+
+def _collapse_sentences(text, min_reps=3):
+    parts = re.findall(r"\S.*?(?:[.!?]+|$)(?=\s|$)", text, re.S)
+    if len(parts) < min_reps:
+        return text
+    keys = [re.sub(r"[^\w\x27]", "", p).lower() for p in parts]
+    out = []
+    i = 0
+    while i < len(parts):
+        reps = 1
+        while i + reps < len(parts) and keys[i + reps] and keys[i + reps] == keys[i]:
+            reps += 1
+        out.append(parts[i])
+        i += reps if reps >= min_reps else 1
+    return " ".join(p.strip() for p in out if p.strip())
+
+
+def _collapse_words(text, min_words=3, min_reps=3):
+    toks = re.findall(r"\S+", text)
+    n = len(toks)
+    if n < min_words * min_reps:
+        return text
+    normed = [_norm(t) for t in toks]
+    out = []
+    i = 0
+    while i < n:
+        found = None
+        # Longest unit first: taking the shortest match collapsed a sub-phrase
+        # and left the rest of the sentence behind as fragments.
+        for unit in range((n - i) // min_reps, min_words - 1, -1):
+            if not all(normed[i:i + unit]):
+                continue
+            seg = normed[i:i + unit]
+            reps, j = 1, i + unit
+            while j + unit <= n and normed[j:j + unit] == seg:
+                reps += 1
+                j += unit
+            if reps >= min_reps:
+                found = (unit, j)
+                break
+        if found:
+            unit, j = found
+            out.extend(toks[i:i + unit])
+            i = j
+        else:
+            out.append(toks[i])
+            i += 1
+    return " ".join(out)
+
+
+text = sys.stdin.read()
+if text.strip():
+    text = _collapse_words(_collapse_sentences(text))
+sys.stdout.write(text)
 ' 2>/dev/null || printf '%s' "$1"
 }
 
@@ -744,6 +872,41 @@ print(t)
 # ---------------------------------------------------------------- diagnostics
 
 cmd_config() {
+    local action="${1:-show}"
+    if [ "$action" = "set" ]; then
+        shift
+        [ $# -gt 0 ] || die "nothing to set. Try: voxtype config set LANGUAGE=hi"
+        local pair key value
+        for pair in "$@"; do
+            case "$pair" in
+                *=*) ;;
+                *) die "'$pair' wants KEY=VALUE, for example LANGUAGE=hi" ;;
+            esac
+            key="${pair%%=*}"
+            value="${pair#*=}"
+            case "$key" in
+                VOXTYPE_*) ;;
+                *) key="VOXTYPE_$key" ;;
+            esac
+            key=$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')
+            case " $CONFIG_KEYS " in
+                *" $key "*) ;;
+                *) die "unknown setting '${key}'. Try: voxtype config" ;;
+            esac
+            mkdir -p "$CONFIG_DIR" || die "could not create $CONFIG_DIR"
+            if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
+                sed -i '' "s|^${key}=.*|${key}=${value}|" "$CONFIG_FILE"
+            else
+                printf '%s=%s\n' "$key" "$value" >> "$CONFIG_FILE"
+            fi
+            echo "set ${key}=${value} in $CONFIG_FILE"
+        done
+        echo
+        echo "the hotkey reads this on every press, so it is already in effect."
+        echo "run 'voxtype doctor' to check the models match."
+        return 0
+    fi
+
     local dir script
     dir=$(model_dir 2>/dev/null) || dir="(not downloaded yet)"
     if [ "$WANT_ROMAN" = "1" ]; then
@@ -761,6 +924,7 @@ timeout     : ${OLLAMA_TIMEOUT}s
 language    : ${LANGUAGE:-auto}
 script      : $script
 state dir   : $STATE_DIR
+config file : $CONFIG_FILE$([ -f "$CONFIG_FILE" ] && echo "" || echo " (none yet)")
 EOF
 }
 
@@ -1118,7 +1282,7 @@ usage: voxtype <command>
   cancel        discard the recording in progress
   restart       cancel, then start again
   status        report recording state
-  config        show resolved settings
+  config        show resolved settings; 'config set KEY=VALUE' stores one
   doctor        check the install and report what is missing
   warmup        pre-download the whisper model
   install-hint  print the two macOS permission steps
@@ -1187,14 +1351,14 @@ case "${1:-help}" in
         if is_recording; then cmd_stop; else cmd_start; fi
         ;;
     status)           cmd_status ;;
-    config)           cmd_config ;;
+    config)           shift; cmd_config "$@" ;;
     doctor)           cmd_doctor ;;
     warmup)           cmd_warmup ;;
     install-hint)     cmd_install_hint ;;
     install-hammerspoon) cmd_install_hammerspoon ;;
     overlay)         shift; cmd_overlay "$@" ;;
     rewrite)
-        reformat "$(strip_tags "$(cat)")"
+        reformat "$(collapse_repeats "$(strip_tags "$(cat)")")"
         printf '\n'
         ;;
     help|-h|--help)   cmd_help ;;

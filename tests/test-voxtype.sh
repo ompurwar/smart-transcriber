@@ -29,8 +29,11 @@ contains() { # contains <name> <needle> <haystack>
     esac
 }
 
-# A private state dir keeps tests from touching the real runtime.
+# Private state and config dirs, so the tests never read or write the real ones.
+# The config file matters here: a language set on the machine running the tests
+# would otherwise change what every one of these checks sees.
 export VOXTYPE_STATE_DIR="$TMP/state"
+export XDG_CONFIG_HOME="$TMP/config"
 mkdir -p "$VOXTYPE_STATE_DIR"
 
 echo "voxtype tests"
@@ -713,6 +716,84 @@ if grep -q 'local replaced = size and hdr_cache.size > 0 and size < hdr_cache.si
     ok "a replaced file is re-parsed rather than trusted"
 else
     bad "a replaced file is re-parsed rather than trusted" "the cache cannot notice a new recording at the same path"
+fi
+
+echo
+echo "config file"
+# Settings have to live on disk, not only in the environment: the hotkey path is
+# run by Hammerspoon, which launchd starts with an environment that has nothing
+# to do with the shell profile, so VOXTYPE_LANGUAGE exported in ~/.zshrc works
+# when you type `voxtype` and does nothing at all for the hotkey.
+CFG="$XDG_CONFIG_HOME/voxtype/config"
+rm -rf "$XDG_CONFIG_HOME"
+
+out=$(bash "$VOXTYPE" config set LANGUAGE=hi 2>&1)
+check "config set writes the key"        "VOXTYPE_LANGUAGE=hi" "$(grep '^VOXTYPE_LANGUAGE=' "$CFG" 2>/dev/null)"
+contains "config set says where it wrote" "$CFG" "$out"
+contains "the setting is in effect immediately" "language    : hi" "$(bash "$VOXTYPE" config)"
+# and it survives into the environment the hotkey gets, which has no VOXTYPE_*
+# variables at all
+contains "a clean environment still sees it" "language    : hi" \
+    "$(env -i HOME="$HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" PATH="/usr/bin:/bin" bash "$VOXTYPE" config)"
+
+bash "$VOXTYPE" config set language=en >/dev/null 2>&1
+check "a short key name works"           "VOXTYPE_LANGUAGE=en" "$(grep '^VOXTYPE_LANGUAGE=' "$CFG" 2>/dev/null)"
+check "and it updates in place"          "1" "$(grep -c '^VOXTYPE_LANGUAGE=' "$CFG" 2>/dev/null)"
+
+# The environment is the deliberate, one-off override, so it has to win.
+contains "an environment variable beats the file" "language    : hi" \
+    "$(VOXTYPE_LANGUAGE=hi bash "$VOXTYPE" config)"
+
+bash "$VOXTYPE" config set NOPE=1 >/dev/null 2>&1
+check "an unknown setting is refused"    "VOXTYPE_LANGUAGE=en" "$(grep '^VOXTYPE_LANGUAGE=' "$CFG" 2>/dev/null)"
+bash "$VOXTYPE" config set BADKEY >/dev/null 2>&1
+check "a bare word is refused"           "VOXTYPE_LANGUAGE=en" "$(grep '^VOXTYPE_LANGUAGE=' "$CFG" 2>/dev/null)"
+# A line that is not one of ours must not be able to export anything.
+printf 'PATH=/tmp/evil\nVOXTYPE_OLLAMA_TIMEOUT=5\n' >> "$CFG"
+check "an alien key in the file is ignored" "VOXTYPE_OLLAMA_TIMEOUT=5" "$(bash "$VOXTYPE" config | grep -c 'timeout     : 5s' >/dev/null && echo 'VOXTYPE_OLLAMA_TIMEOUT=5')"
+rm -rf "$XDG_CONFIG_HOME"
+
+echo
+echo "repeated phrase collapse"
+# Whisper locks onto a phrase and emits it until the segment ends, and the
+# rewriter copies the loop straight through -- measured, qwen2.5:1.5b returned a
+# transcript with five copies of the same sentence unchanged. So the collapse
+# happens on the raw transcript, which also protects the fallback path.
+collapse_src="$TMP/collapse.py"
+python3 - "$collapse_src" <<'PY'
+import pathlib, re, sys
+src = pathlib.Path("bin/voxtype").read_text()
+m = re.search(r"collapse_repeats\(\) \{\n    printf '%s' \"\$1\" \| python3 -c '\n(.*?)\n' 2>/dev/null", src, re.S)
+if not m:
+    sys.exit("could not locate the collapse filter inside bin/voxtype")
+pathlib.Path(sys.argv[1]).write_text(m.group(1))
+PY
+if [ ! -f "$collapse_src" ]; then
+    bad "collapse extracted" "bin/voxtype no longer contains the expected block"
+else
+    ok "collapse extracted"
+    collapse() { printf '%s' "$1" | python3 "$collapse_src"; }
+
+    looped='I want the results in the form of an email. I want the results in the form of an email. I want the results in the form of an email.'
+    check "a thrice-repeated sentence collapses to one" \
+        "I want the results in the form of an email." "$(collapse "$looped")"
+
+    clause='I want it in the form of a PDF, which is a form of email, which is a form of email, which is a form of email.'
+    # The first occurrence is kept exactly as it came in, comma and all: the
+    # rewriter is what fixes punctuation.
+    check "a thrice-repeated clause collapses too" \
+        "I want it in the form of a PDF, which is a form of email," "$(collapse "$clause")"
+
+    # Nothing below is a decoder loop, so nothing below may be touched.
+    for keep in \
+        "No no no, that is not what I meant." \
+        "It was very very good, honestly." \
+        "I think that, I think that maybe we should wait." \
+        "I want the report. I want the report, which is attached." \
+        "The results are in. The results are good." \
+        "Send it to me, then call me, then leave a message." ; do
+        check "left alone: ${keep:0:40}" "$keep" "$(collapse "$keep")"
+    done
 fi
 
 echo
