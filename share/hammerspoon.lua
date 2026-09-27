@@ -237,7 +237,7 @@ do
     -- so the samples do not start at the usual byte 44 and are not 16-bit. The
     -- header is parsed for the data offset, width and channel count rather than
     -- assumed, because a different sox or input device changes all three.
-    local hdr_cache = { path = nil }
+    local hdr_cache = { path = nil, size = 0 }
 
     local function parse_header(path)
       local f = io.open(path, "rb")
@@ -263,10 +263,30 @@ do
       }
     end
 
-    local function header_for(path)
-      if hdr_cache.path ~= path then
-        hdr_cache.path = path
-        hdr_cache.hdr = parse_header(path)
+    -- Cached, because this runs twelve times a second and parsing means reading
+    -- 256 bytes each time. A failure is never cached, and that is the point of
+    -- the function rather than an optimisation detail:
+    --
+    -- The recorder writes to the same path every time and the file is deleted
+    -- between recordings, so any single poll that landed while the file was
+    -- missing or half-written used to cache a nil header against that path
+    -- permanently. Every recording after it then read no levels at all, for the
+    -- rest of the Hammerspoon session: a flat, unmoving waveform, and before the
+    -- renderer was keyed off the stage, the transcribing dots showing up during
+    -- a recording. It looked intermittent because it depended on whether a poll
+    -- happened to fall in the gap between the file being removed and sox
+    -- creating it again.
+    local function header_for(path, size)
+      local replaced = size and hdr_cache.size > 0 and size < hdr_cache.size
+      if hdr_cache.path ~= path or not hdr_cache.hdr or replaced then
+        local hdr = parse_header(path)
+        if not hdr then return nil end
+        hdr_cache.path, hdr_cache.hdr = path, hdr
+        hdr_cache.size = size or 0
+      elseif size and size > hdr_cache.size then
+        -- A high-water mark, so the file merely growing never looks like a
+        -- replacement.
+        hdr_cache.size = size
       end
       return hdr_cache.hdr
     end
@@ -295,13 +315,16 @@ do
     -- millisecond per bar, so the bars were all showing the same instant of
     -- noise and the whole thing read as a shimmer instead of a waveform.
     local function read_levels(path)
-      local h = header_for(path)
-      if not h or h.bps ~= 4 and h.bps ~= 2 then return nil end
-
-      local per_bar = math.max(1, math.floor(h.rate * BAR_MS / 1000))
       local f = io.open(path, "rb")
       if not f then return nil end
       local size = f:seek("end")
+
+      -- The size goes in, so a file that shrank since the header was cached is
+      -- recognised as a different recording and re-parsed.
+      local h = header_for(path, size)
+      if not h or h.bps ~= 4 and h.bps ~= 2 then f:close() return nil end
+
+      local per_bar = math.max(1, math.floor(h.rate * BAR_MS / 1000))
       local want = BARS * per_bar * h.bps * h.ch
       local start = math.max(h.off - 1, size - want)
       if start >= size - 1 then f:close() return nil end

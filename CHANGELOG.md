@@ -49,6 +49,15 @@
   canvas and reading the glyph rows back with `imageFromCanvas`; the label and
   the clock both land dead on the midline. Menlo, used for the clock's digits,
   sits 2px higher in its frame than the system font and gets its own nudge.
+- Fixed the waveform freezing, and the transcribing dots appearing, during a
+  recording. The wav header was cached against the file's path, and a failure
+  was cached too. Since the recorder writes to the same path every time and the
+  file is deleted between recordings, one poll that landed while the file was
+  missing cached a nil header for the rest of the session, after which every
+  recording read no levels at all. A failure is never cached now, and a file
+  that has shrunk since it was cached is re-parsed rather than trusted. It
+  looked intermittent because it needed a poll to land in the gap between the
+  file being removed and sox creating it again.
 - The pill reacts on the key press instead of a moment later. The stage was
   published after a 350ms liveness sleep and two `osascript` spawns (the beep
   and the notification), so starting felt sluggish; measured with real sox it

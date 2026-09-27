@@ -698,6 +698,22 @@ if grep -q 'out\[bar + 1\] = peak' "$ROOT/share/hammerspoon.lua"; then
 else
     bad "the bars are collected 1-based so none are dropped" "read_levels indexes from zero"
 fi
+# The recorder writes to the same path every time and the file is deleted between
+# recordings, so caching a failed header parse against that path poisoned it for
+# the rest of the Hammerspoon session: every later recording read no levels, which
+# showed up as a flat, unmoving waveform or as the transcribing dots appearing
+# during recording. Intermittent, because it needed one poll to land in the gap
+# between the file being removed and sox creating it again.
+if grep -q 'Never cache a failure\|if not hdr then return nil end' "$ROOT/share/hammerspoon.lua"; then
+    ok "a failed header parse is not cached"
+else
+    bad "a failed header parse is not cached" "a nil header can still be cached against the path"
+fi
+if grep -q 'local replaced = size and hdr_cache.size > 0 and size < hdr_cache.size' "$ROOT/share/hammerspoon.lua"; then
+    ok "a replaced file is re-parsed rather than trusted"
+else
+    bad "a replaced file is re-parsed rather than trusted" "the cache cannot notice a new recording at the same path"
+fi
 
 echo
 echo "incomplete model"
