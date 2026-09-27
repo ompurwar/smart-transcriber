@@ -230,6 +230,40 @@ got=$(printf 'um the plain raw words' \
       bash "$VOXTYPE" rewrite 2>/dev/null)
 check "falls back to raw when ollama is down" "um the plain raw words" "$got"
 
+# A non-ASCII character straight after $VAR becomes part of the variable name,
+# so `$REPO_URL...` with a real ellipsis fails at runtime. It only shows up on
+# the piped-install path, which is the one every new user takes.
+echo
+echo "no unicode glued to a shell variable"
+pyfiles=()
+while IFS= read -r f; do pyfiles+=("$f"); done < <(find "$ROOT" -type f \
+    \( -name '*.sh' -o -name '*.lua' -o -name '*.rb' -o -name '*.yml' -o -name 'voxtype' -o -name 'common.sh' \) \
+    -not -path '*/.git/*')
+suspect=$(python3 - "$ROOT" <<'PYU'
+import pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+pat = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[^\x00-\x7f]")
+out = []
+for f in sorted(root.rglob("*")):
+    if f.is_dir() or ".git" in f.parts:
+        continue
+    if not (f.suffix in {".sh", ".lua", ".rb", ".yml"} or f.name == "voxtype"):
+        continue
+    try:
+        for n, line in enumerate(f.read_text().splitlines(), 1):
+            if pat.search(line):
+                out.append("%s:%s" % (f.relative_to(root), n))
+    except Exception:
+        pass
+print("\n".join(out))
+PYU
+)
+if [ -z "$suspect" ]; then
+    ok "no unicode after a shell variable"
+else
+    bad "no unicode after a shell variable" "found at: $(echo "$suspect" | tr '\n' ' ')"
+fi
+
 echo
 echo "hammerspoon module"
 hs="$ROOT/share/hammerspoon.lua"

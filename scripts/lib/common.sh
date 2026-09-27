@@ -51,7 +51,7 @@ ensure_formula() {
         ok "$label (already installed)"
         return 0
     fi
-    info "installing $formula…"
+    info "installing ${formula}..."
     if [ "${DRY_RUN:-0}" = "1" ]; then
         info "would run: brew install $formula"
         return 0
@@ -68,7 +68,7 @@ ensure_cask() {
         ok "$cask (already installed)"
         return 0
     fi
-    info "installing $cask…"
+    info "installing ${cask}..."
     if [ "${DRY_RUN:-0}" = "1" ]; then
         info "would run: brew install --cask $cask"
         return 0

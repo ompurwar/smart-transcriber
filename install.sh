@@ -64,9 +64,9 @@ else
     # Piped through stdin: fetch a shallow clone into a temp dir.
     REPO_ROOT="$(mktemp -d)"
     echo "smart-transcriber installer"
-    echo "cloning $REPO_URL…"
-    if ! git clone --depth 1 --branch main "$REPO_URL" "$REPO_ROOT" 2>/dev/null; then
-        echo "error: could not clone $REPO_URL" >&2
+    echo "cloning ${REPO_URL}..."
+    if ! git clone --depth 1 --branch main "${REPO_URL}" "$REPO_ROOT" 2>/dev/null; then
+        echo "error: could not clone ${REPO_URL}" >&2
         exit 1
     fi
     CLEANUP_CLONE=1
