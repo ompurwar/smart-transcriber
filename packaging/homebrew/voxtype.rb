@@ -36,7 +36,7 @@ class Voxtype < Formula
 
       Pull the local rewrite model once:
 
-        ollama pull qwen2.5:7b
+        ollama pull qwen2.5:1.5b
         voxtype warmup
 
       Check the install at any time:

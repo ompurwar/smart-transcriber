@@ -59,7 +59,7 @@ setup_ollama() {
         return 0
     fi
 
-    info "pulling '$REWRITE_MODEL' (about 5 GB, one time)…"
+    info "pulling '$REWRITE_MODEL' (about 1 GB, one time)…"
     if [ "${DRY_RUN:-0}" = "1" ]; then
         info "would run: ollama pull $REWRITE_MODEL"
         return 0

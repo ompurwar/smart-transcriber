@@ -25,7 +25,7 @@ WHISPER_VARIANT="${VOXTYPE_WHISPER_MODEL:-small.en}"
 WHISPER_CACHE="${VOXTYPE_WHISPER_CACHE:-$HOME/.cache/whisperkit}"
 
 OLLAMA_URL="${VOXTYPE_OLLAMA_URL:-http://localhost:11434/api/generate}"
-OLLAMA_MODEL="${VOXTYPE_OLLAMA_MODEL:-qwen2.5:7b}"
+OLLAMA_MODEL="${VOXTYPE_OLLAMA_MODEL:-qwen2.5:1.5b}"
 OLLAMA_TIMEOUT="${VOXTYPE_OLLAMA_TIMEOUT:-90}"
 LANGUAGE="${VOXTYPE_LANGUAGE:-en}"
 PASTE="${VOXTYPE_NO_PASTE:-0}"
@@ -601,7 +601,7 @@ hotkeys (via Hammerspoon)
 environment
   VOXTYPE_LANGUAGE        speech language, default en (empty = auto)
   VOXTYPE_WHISPER_MODEL   whisper variant, default small.en
-  VOXTYPE_OLLAMA_MODEL    rewrite model, default qwen2.5:7b
+  VOXTYPE_OLLAMA_MODEL    rewrite model, default qwen2.5:1.5b
   VOXTYPE_OLLAMA_URL      ollama endpoint, default http://localhost:11434/api/generate
   VOXTYPE_OLLAMA_TIMEOUT  rewrite timeout in seconds, default 90
   VOXTYPE_MODEL_DIR       override the discovered whisper model directory
