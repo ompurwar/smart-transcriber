@@ -45,7 +45,9 @@ class Voxtype < Formula
   end
 
   test do
+    # `voxtype version` prints the bare version, so match the number rather than
+    # the word: asserting on "version" here can never pass.
     assert_match "doctor", shell_output("#{bin}/voxtype help")
-    assert_match "version", shell_output("#{bin}/voxtype version")
+    assert_equal version.to_s, shell_output("#{bin}/voxtype version").strip
   end
 end
