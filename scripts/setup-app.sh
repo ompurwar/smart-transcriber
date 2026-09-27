@@ -106,13 +106,22 @@ setup_hammerspoon() {
 
     # A fixed wait was not enough: the hotkeys were sometimes still dead seconds
     # after a fresh install. Wait for the module's own load marker instead.
+    #
+    # The previous run's marker has to go first, or a reinstall finds yesterday's
+    # 'hotkeys loaded' already in the log, reports success instantly, and the
+    # hotkeys are in fact still dead. Keep the old log as hs.log.1 for debugging.
+    local marker="$HOME/.cache/voxtype/hs.log"
+    if [ -f "$marker" ]; then
+        mv -f "$marker" "$marker.1" 2>/dev/null || rm -f "$marker" 2>/dev/null
+    fi
+
     if pgrep -x Hammerspoon >/dev/null 2>&1; then
         osascript -e 'tell application "Hammerspoon" to quit' >/dev/null 2>&1 || true
         sleep 1
     fi
     open -a Hammerspoon 2>/dev/null || warn "could not launch Hammerspoon"
 
-    local marker="$HOME/.cache/voxtype/hs.log" loaded=0
+    local loaded=0
     for _ in $(seq 1 30); do
         if [ -f "$marker" ] && grep -q 'hotkeys loaded' "$marker" 2>/dev/null; then
             loaded=1

@@ -498,6 +498,73 @@ check_rc "a corrupt tarball fails loudly" 1 "$RC"
 contains "a corrupt tarball is reported" "could not download" "$OUT"
 
 echo
+echo "how the hotkeys get dropped"
+# An earlier draft told the user to restart Hammerspoon but first tried
+# osascript 'to reload', which Hammerspoon does not implement, so the line
+# always failed silently and the hotkeys stayed live after an uninstall. The
+# hs CLI cannot help either: it only reaches a running instance when hs.ipc is
+# loaded, and this project cannot load it because an explicit require() of an
+# extension hangs in Hammerspoon 1.1.1. So a restart is the answer, and the
+# messages have to say that.
+if grep -q "to reload" "$ROOT/install.sh"; then
+    bad "no unsupported AppleScript reload" "install.sh still calls 'to reload'"
+elif grep -q "restarting Hammerspoon" "$ROOT/install.sh"; then
+    ok "no unsupported AppleScript reload"
+else
+    bad "no unsupported AppleScript reload" "the restart path is gone"
+fi
+if grep -q 'tell application "Hammerspoon" to quit' "$ROOT/install.sh"; then
+    ok "the restart path quits Hammerspoon, which works"
+else
+    bad "the restart path quits Hammerspoon, which works" "no quit call found"
+fi
+H=$(fresh restart)
+mkdir -p "$H/.hammerspoon" "$H/state"
+printf 'require("voxtype")\n' > "$H/.hammerspoon/init.lua"
+run "$H"
+run "$H" --uninstall
+contains "headless uninstall tells you to restart by hand" "restart Hammerspoon" "$OUT"
+
+echo
+echo "the hotkey marker cannot be stale"
+# The wait loop trusts ~/.cache/voxtype/hs.log. A leftover 'hotkeys loaded' from
+# a previous run makes a reinstall report success instantly while the hotkeys are
+# still dead, which is exactly what a stale-marker check hides. The log has to be
+# rotated before Hammerspoon is relaunched, keeping the old one as hs.log.1.
+if grep -q 'hs.log.1' "$ROOT/scripts/setup-app.sh"; then
+    ok "the marker log is rotated before relaunch"
+else
+    bad "the marker log is rotated before relaunch" "no rotation in setup-app.sh"
+fi
+# Order matters: rotate first, then relaunch, or the new run appends to the old
+# log and the check is still meaningless.
+rot=$(grep -n 'hs.log.1\|open -a Hammerspoon' "$ROOT/scripts/setup-app.sh" | head -2 | cut -d: -f1 | tr '\n' ' ')
+set -- $rot
+if [ "${1:-}" -lt "${2:-0}" ] 2>/dev/null; then
+    ok "the log is rotated before Hammerspoon is relaunched"
+else
+    bad "the log is rotated before Hammerspoon is relaunched" "order is wrong: $rot"
+fi
+
+H=$(fresh marker)
+mkdir -p "$H/.cache/voxtype"
+printf 'pasted: old dictation\nhotkeys loaded 2020-01-01T00:00:00\n' > "$H/.cache/voxtype/hs.log"
+printf 'require("voxtype")\n' > /dev/null
+# Simulate the rotation the installer performs, then prove the old line is gone
+# from the log the wait loop reads.
+mv -f "$H/.cache/voxtype/hs.log" "$H/.cache/voxtype/hs.log.1"
+if grep -q 'hotkeys loaded' "$H/.cache/voxtype/hs.log" 2>/dev/null; then
+    bad "a stale marker cannot be read as a fresh load" "stale line still present"
+else
+    ok "a stale marker cannot be read as a fresh load"
+fi
+if grep -q 'hotkeys loaded' "$H/.cache/voxtype/hs.log.1"; then
+    ok "the old log is kept for debugging"
+else
+    bad "the old log is kept for debugging" "hs.log.1 lost the history"
+fi
+
+echo
 if [ "$fail" -eq 0 ]; then
     printf '\033[32m%d passed, 0 failed\033[0m\n' "$pass"
     exit 0

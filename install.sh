@@ -215,16 +215,29 @@ do_uninstall() {
         fi
     fi
 
-    # Reloading is enough to drop the hotkeys now that the module is gone, and it
-    # is far less disruptive than quitting an app the user may rely on for other
-    # things. Never do it headless: that is a real user's running Hammerspoon.
+    # Drop the hotkeys now that the module is gone.
+    #
+    # Hammerspoon has no AppleScript 'reload' command, and its hs CLI can only
+    # reach a running instance when hs.ipc is loaded, which this project cannot
+    # do because an explicit require() of an extension hangs in 1.1.1. So a
+    # restart is the only reliable option. It is safe: the user's config is on
+    # disk and is re-read on launch. Never do it headless, where "the running
+    # Hammerspoon" is a real user's and not ours.
     if [ "${VOXTYPE_HEADLESS:-0}" = "1" ]; then
         info "headless: did not touch the running Hammerspoon"
+        info "restart Hammerspoon to drop the hotkeys"
     elif pgrep -x Hammerspoon >/dev/null 2>&1; then
-        if osascript -e 'tell application "Hammerspoon" to reload' >/dev/null 2>&1; then
-            ok "reloaded Hammerspoon to drop the hotkeys"
+        info "restarting Hammerspoon to drop the hotkeys…"
+        osascript -e 'tell application "Hammerspoon" to quit' >/dev/null 2>&1 || true
+        for _ in $(seq 1 10); do
+            pgrep -x Hammerspoon >/dev/null 2>&1 || break
+            sleep 1
+        done
+        if pgrep -x Hammerspoon >/dev/null 2>&1; then
+            warn "Hammerspoon did not quit; quit it yourself to drop the hotkeys"
         else
-            info "restart Hammerspoon to drop the hotkeys"
+            open -a Hammerspoon 2>/dev/null || warn "could not relaunch Hammerspoon"
+            ok "Hammerspoon restarted without voxtype"
         fi
     fi
 
