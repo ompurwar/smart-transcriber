@@ -827,6 +827,88 @@ out=$(VOXTYPE_MODEL_DIR="$HALF" VOXTYPE_STATE_DIR="$VOXTYPE_STATE_DIR" \
 contains "a half-downloaded model is not called ready" "incomplete" "$out"
 
 echo
+echo "audio preparation"
+# Two problems measured on real recordings from this machine: a recording left
+# running after the speaker stopped put 9.9 seconds of silence on the end of a 5
+# second utterance, and whisper invents words for silence rather than skipping
+# it; and the input peaks around 0.1, about 20dB below where speech belongs.
+prep_src="$TMP/prep.py"
+python3 - "$prep_src" <<'PY'
+import pathlib, sys
+lines = pathlib.Path("bin/voxtype").read_text().split("\n")
+start = end = None
+for i, line in enumerate(lines):
+    if "summary=$(python3" in line and "<<'PY'" in line:
+        start = i + 1
+    elif start is not None and line.strip() == "PY":
+        end = i
+        break
+if start is None or end is None:
+    sys.exit("could not locate prepare_audio inside bin/voxtype")
+pathlib.Path(sys.argv[1]).write_text("\n".join(lines[start:end]))
+PY
+if [ ! -f "$prep_src" ]; then
+    bad "prepare_audio extracted" "bin/voxtype no longer contains the expected block"
+else
+    ok "prepare_audio extracted"
+    make_wav() { # make_wav <path> <speech_seconds> <silence_seconds>
+        python3 -c '
+import math, struct, sys
+path, speech, silence = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
+rate = 48000
+def tone(secs, amp):
+    return b"".join(struct.pack("<i", int(amp * 2147483647 * math.sin(2 * math.pi * 220 * i / rate)))
+                    for i in range(int(rate * secs)))
+def quiet(secs):
+    return b"\x01\x00\x00\x00" * int(rate * secs)
+data = tone(speech, 0.10) + quiet(silence)
+fmt = struct.pack("<HHIIHH", 1, 1, rate, rate * 4, 4, 32)
+hdr = b"RIFF" + struct.pack("<I", 4 + 8 + len(fmt) + 8 + len(data)) + b"WAVE"
+hdr += b"fmt " + struct.pack("<I", len(fmt)) + fmt
+hdr += b"data" + struct.pack("<I", len(data))
+open(path, "wb").write(hdr + data)
+' "$1" "$2" "$3"
+    }
+    wavsec() { python3 -c '
+import struct, sys
+d = open(sys.argv[1], "rb").read()
+i = d.find(b"data", 12)
+rate = d[24] | d[25] << 8 | d[26] << 16 | d[27] << 24
+print(int((len(d) - i - 8) / 4 / rate))
+' "$1"; }
+
+    make_wav "$TMP/long-tail.wav" 2 10
+    check "the fixture is 12 seconds" "12" "$(wavsec "$TMP/long-tail.wav")"
+    python3 "$prep_src" "$TMP/long-tail.wav" "$TMP/long-tail.out.wav" >/dev/null 2>&1
+    kept=$(wavsec "$TMP/long-tail.out.wav")
+    if [ "$kept" -lt 6 ] && [ "$kept" -gt 1 ]; then
+        ok "a long silent tail is trimmed ($kept s of 12)"
+    else
+        bad "a long silent tail is trimmed" "kept ${kept}s of 12"
+    fi
+
+    # The guard matters more than the trim: a quiet or short recording must not
+    # be reduced to nothing.
+    make_wav "$TMP/quiet.wav" 0 2
+    python3 "$prep_src" "$TMP/quiet.wav" "$TMP/quiet.out.wav" >/dev/null 2>&1
+    if [ -s "$TMP/quiet.out.wav" ]; then
+        ok "a recording with nothing in it survives"
+    else
+        bad "a recording with nothing in it survives" "the prepared file is empty"
+    fi
+
+    # The gain is the other half: speech at 0.1 is lifted towards 0.3.
+    make_wav "$TMP/peak.wav" 2 0
+    summary=$(python3 "$prep_src" "$TMP/peak.wav" "$TMP/peak.out.wav" 2>/dev/null)
+    gain=$(printf '%s' "$summary" | sed -n 's/.*gain=\([0-9]*\).*/\1/p')
+    if [ -n "$gain" ] && [ "$gain" -ge 5 ] && [ "$gain" -le 18 ]; then
+        ok "a quiet recording is lifted (+${gain}dB)"
+    else
+        bad "a quiet recording is lifted" "gain was [${gain:-none}]"
+    fi
+fi
+
+echo
 echo "recording archive"
 # Keeping the audio is opt-in, because the promise elsewhere is that speech is
 # transcribed and thrown away. When it is on, each recording is named with the

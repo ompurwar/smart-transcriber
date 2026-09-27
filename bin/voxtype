@@ -375,11 +375,17 @@ archive_recording() {
 
     python3 - "$ARCHIVE_DIR/$base.json" "$when" "$hash" "$mode" \
         "$KEEP_RECORDINGS" "$WHISPER_VARIANT" "$OLLAMA_MODEL" "${LANGUAGE:-auto}" \
-        "$raw" "$clean" <<'PY' 2>/dev/null
+        "$raw" "$clean" "${PREP_PEAK:-}" "${PREP_GAIN_DB:-}" <<'PY' 2>/dev/null
 import json, os, sys
 
 (path, when, digest, mode, keep, whisper, rewriter, language,
- raw, clean) = sys.argv[1:11]
+ raw, clean, peak, gain) = sys.argv[1:13]
+
+def num(value, cast):
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        return None
 
 json.dump({
     "when": when,
@@ -390,6 +396,11 @@ json.dump({
     "whisper": whisper,
     "rewriter": rewriter,
     "kept": int(keep),
+    # What the audio looked like before transcription was prepared from it. The
+    # peak explains most bad transcripts on this machine: speech arriving at 0.1
+    # is about 20dB below where it should be.
+    "input_peak": num(peak, float),
+    "gain_db": num(gain, int),
     "raw_transcript": raw,
     "final_text": clean,
 }, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
@@ -532,8 +543,15 @@ cmd_stop() {
     fi
 
     { hud "transcribing…"; } &
+    # Trim the quiet ends and lift the level, then transcribe that. The original
+    # is kept for the archive: the point of the archive is to be able to see what
+    # the recorder actually produced, not what it was turned into.
+    local prepared="$STATE_DIR/rec.prepared.wav" audio="$WAV"
+    if prepare_audio "$WAV" "$prepared"; then audio="$prepared"; fi
+
     local raw
-    raw=$(transcribe "$WAV")
+    raw=$(transcribe "$audio")
+    rm -f "$prepared"
     raw=$(strip_tags "$raw")
     raw=$(collapse_repeats "$raw")
 
@@ -594,6 +612,122 @@ cmd_restart() {
 }
 
 # ---------------------------------------------------------------- stages
+
+
+# Trim the ends and lift the level before transcription.
+#
+# Both come from measuring the recordings this tool actually produced:
+#
+#   * leaving the recorder running after speaking left 9.9 seconds of silence on
+#     the end of a 5 second utterance, and whisper does not skip silence, it
+#     invents words for it -- that recording came back as "लिए वड़ा से आपनें जा तो
+#     ज़ा तो आपने वगाँ";
+#   * the input peaks around 0.1, roughly 20dB below where speech normally sits,
+#     which costs accuracy on its own.
+#
+# Only the ends, and only a long run of quiet: a quiet passage in the middle of
+# speech looks just like silence by level alone, and trimming on level alone ate
+# real speech in testing. Nothing is forced either -- if the trim would leave
+# less than a second, or python or sox is unavailable, the original is used.
+#
+# Sets PREP_PEAK and PREP_GAIN_DB for the archive sidecar, and returns non-zero
+# if the prepared file should not be used.
+prepare_audio() {
+    local src="$1" dst="$2"
+    PREP_PEAK=""; PREP_GAIN_DB=""
+    [ -s "$src" ] || return 1
+    have python3 || return 1
+
+    local summary
+    summary=$(python3 - "$src" "$dst" <<'PY' 2>/dev/null
+import array, math, struct, sys
+
+src, dst = sys.argv[1], sys.argv[2]
+d = open(src, "rb").read()
+i = d.find(b"data", 12)
+if i < 0:
+    sys.exit(1)
+bits = d[34] | d[35] << 8
+ch = d[22] | d[23] << 8
+rate = d[24] | d[25] << 8 | d[26] << 16 | d[27] << 24
+off = i + 8
+bps = bits // 8
+if bps not in (2, 4) or rate <= 0:
+    sys.exit(1)
+n = (len(d) - off) // (bps * ch)
+a = array.array("i" if bps == 4 else "h")
+a.frombytes(d[off:off + n * bps * ch])
+if ch > 1:
+    a = a[::ch]
+if len(a) < rate // 2:
+    sys.exit(1)
+
+scale = 2147483648.0 if bps == 4 else 32768.0
+peak = max(max(a), -min(a)) / scale
+win = max(1, rate // 20)          # 50ms
+step = 4
+rms = []
+for k in range(0, len(a) - win, win):
+    s = 0.0
+    c = 0
+    for j in range(k, k + win, step):
+        v = a[j]
+        s += v * v
+        c += 1
+    rms.append(math.sqrt(s / (c * scale * scale)))
+if not rms:
+    sys.exit(1)
+
+ordered = sorted(rms)
+noise = ordered[int(len(ordered) * 0.2)]
+thr = max(noise * 1.5, peak * 0.02)
+silent = [v <= thr for v in rms]
+min_run = max(1, int(1.5 / (win / rate)))   # a run has to be long to count
+
+
+def run_at_end(seq):
+    c = 0
+    for v in reversed(seq):
+        if not v:
+            break
+        c += 1
+    return c
+
+
+head, tail = run_at_end(list(reversed(silent))), run_at_end(silent)
+margin = int(0.3 * rate)
+start = max(0, head * win - margin) if head >= min_run else 0
+end = min(len(a), (len(silent) - tail) * win + margin) if tail >= min_run else len(a)
+if (end - start) / rate < 1.0:              # too little left, do not touch it
+    start, end = 0, len(a)
+
+gain_db = 0
+if peak > 0.001:
+    gain_db = int(max(0, min(18, round(20 * math.log10(0.3 / peak)))))
+
+seg = a[start:end]
+if gain_db:
+    lim = 2147483647 if bps == 4 else 32767
+    factor = 10 ** (gain_db / 20)
+    seg = array.array(seg.typecode,
+                      (max(-lim - 1, min(lim, int(v * factor))) for v in seg))
+
+hdr = bytearray(d[:off])
+nbytes = len(seg) * bps * ch
+struct.pack_into("<I", hdr, i + 4, nbytes)
+struct.pack_into("<I", hdr, 4, len(hdr) + nbytes - 8)
+open(dst, "wb").write(bytes(hdr) + seg.tobytes())
+
+print("peak=%.4f gain=%d kept=%.1f of %.1f" % (
+    peak, gain_db, (end - start) / rate, len(a) / rate))
+PY
+)
+    [ -s "$dst" ] || return 1
+    PREP_PEAK=$(printf '%s' "$summary" | sed -n 's/.*peak=\([0-9.]*\).*/\1/p')
+    PREP_GAIN_DB=$(printf '%s' "$summary" | sed -n 's/.*gain=\([0-9]*\).*/\1/p')
+    [ -n "$PREP_GAIN_DB" ] || PREP_GAIN_DB=0
+    return 0
+}
 
 transcribe() {
     local wav="$1"

@@ -165,6 +165,22 @@ hands the Devanagari straight back; and `qwen2.5:1.5b` translates the words into
 English. A table has none of those failure modes and cannot mistranslate, and it
 is instant.
 
+### If the transcripts are poor
+
+Three things are worth checking, in order, because they explain almost every bad
+transcript seen on the machine this was built on:
+
+1. **Is the language right?** A non-English language on the default English
+   model does not fail, it forces the sounds into English words. See
+   [languages](#languages).
+2. **How loud is the input?** `voxtype recordings` keeps the last N recordings
+   with the input peak in each sidecar. Speech should peak around 0.3-0.8; if
+   yours sits near 0.1 the microphone gain is low, and `voxtype` lifts it before
+   transcribing but it is better fixed at the source.
+3. **Is there a lot of silence after you stop talking?** Whisper does not skip
+   silence, it invents words for it. `voxtype` trims a long quiet run from either
+   end before transcribing for exactly this reason.
+
 ### Setting things without a shell profile
 
 `VOXTYPE_LANGUAGE` and friends can be exported in your shell profile, and that
