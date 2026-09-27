@@ -186,7 +186,7 @@ voxtype overlay reset                       # back to the defaults
 | `VOXTYPE_PILL_R` | half the height | corner radius; the default is a full pill shape |
 | `VOXTYPE_WAVE_H` | `36` | tallest waveform bar |
 | `VOXTYPE_BARS` | `24` | how many bars |
-| `VOXTYPE_TEXT_DY` | `-3` | nudge the label and clock up or down |
+| `VOXTYPE_TEXT_DY` | `-1` | nudge the label and clock; the default is where they measured centred |
 
 These are written to `~/.cache/voxtype/overlay.conf`. The same names work as
 environment variables, which take precedence, but Hammerspoon is started by

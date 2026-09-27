@@ -41,6 +41,14 @@
   the digits stop shifting as the seconds change; the pill has a shadow so it
   stays legible over a light desktop; and the space freed by shortening the
   "on your clipboard" label to "copied" went to the waveform.
+- The overlay's label and clock are now centred on the pill's midline. There is
+  no vertical alignment attribute in this build of Hammerspoon, and the
+  `hs.drawing.textSize` the module was calling does not exist in it, so the old
+  code silently fell back to a fraction of the point size and the label sat
+  about 2px high. The offsets are now measured by rendering the text onto a
+  canvas and reading the glyph rows back with `imageFromCanvas`; the label and
+  the clock both land dead on the midline. Menlo, used for the clock's digits,
+  sits 2px higher in its frame than the system font and gets its own nudge.
 
 ## v0.1.0
 

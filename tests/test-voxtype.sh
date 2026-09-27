@@ -652,6 +652,30 @@ else
 fi
 
 echo
+echo "overlay alignment"
+# There is no vertical alignment attribute and no text measurement API in this
+# build, so the offsets are calibrated by rendering a canvas and reading the
+# glyph rows back. Guard the two things that took a probe to find: that the dead
+# hs.drawing.textSize call is not reinstated (it exists in the docs, fails at
+# runtime, and silently fell back to a guess), and that the clock keeps its own
+# nudge, without which it sits 2px above the label.
+if grep -qE 'hs\.drawing +and +hs\.drawing\.textSize|pcall\(hs\.drawing\.textSize' "$ROOT/share/hammerspoon.lua"; then
+    bad "the dead text measurement is gone" "hs.drawing.textSize is called again"
+else
+    ok "the dead text measurement is gone"
+fi
+if grep -q 'TEXT_DY + CLOCK_DY' "$ROOT/share/hammerspoon.lua"; then
+    ok "the clock has its own vertical nudge"
+else
+    bad "the clock has its own vertical nudge" "the clock shares TEXT_DY with the label and will sit high"
+fi
+if grep -q 'VOXTYPE_TEXT_DY:--1' "$ROOT/bin/voxtype"; then
+    ok "the default nudge is the calibrated one"
+else
+    bad "the default nudge is the calibrated one" "voxtype overlay reports a different default"
+fi
+
+echo
 echo "incomplete model"
 # An interrupted download leaves the model directory behind with only part of
 # the CoreML bundles, and every transcription then fails to load it. A directory

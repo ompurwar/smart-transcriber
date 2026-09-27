@@ -1061,7 +1061,7 @@ cmd_overlay() {
         VOXTYPE_PILL_R  "${VOXTYPE_PILL_R:-26}" \
         VOXTYPE_WAVE_H  "${VOXTYPE_WAVE_H:-36}" \
         VOXTYPE_BARS    "${VOXTYPE_BARS:-24}" \
-        VOXTYPE_TEXT_DY "${VOXTYPE_TEXT_DY:--3}"
+        VOXTYPE_TEXT_DY "${VOXTYPE_TEXT_DY:--1}"
     if [ -f "$OVERLAY_CONF" ]; then
         echo
         echo "  in $OVERLAY_CONF:"

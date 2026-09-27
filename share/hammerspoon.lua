@@ -149,7 +149,6 @@ do
     local PILL_R = num("VOXTYPE_PILL_R", PILL_H / 2)
     local MAX_H  = num("VOXTYPE_WAVE_H", 36)
     local BARS   = math.floor(num("VOXTYPE_BARS", 24))
-    local TEXT_DY = snum("VOXTYPE_TEXT_DY", -3)
     local LABEL_SZ, CLOCK_SZ = 13, 12
     local DOT_X, DOT_R = 20, 4.5
     -- The widest label is "nothing heard" at about 84px; the old 112 reserved
@@ -167,22 +166,30 @@ do
     local TICK = 1 / 12      -- seconds between repaints
     local STALE_AFTER = 45   -- hide if a stage has not been refreshed by now
     local DONE_FOR = 1.0     -- how long "pasted" stays up
-
-    -- Centring a string on the pill means knowing how tall the font actually
-    -- draws it, which is not the point size: the line box carries leading, and
-    -- drawing from a fixed fraction of the point size left the label sitting
-    -- below the stage dot. Ask for the real height instead, and leave
-    -- VOXTYPE_TEXT_DY on top for the last pixel or two.
-    local function text_frame(x, w, size, text)
-      local th = size * 1.2
-      if hs.drawing and hs.drawing.textSize then
-        local ok, _, measured = pcall(hs.drawing.textSize, text or "",
-          { fontName = "HelveticaNeue", fontSize = size })
-        if ok and type(measured) == "table" and measured.h and measured.h > 0 then
-          th = measured.h
-        end
-      end
-      return { x = x, y = CY - th / 2 + TEXT_DY, w = w, h = th }
+    -- Centring text on the pill is done by measurement, not by a fraction of the
+    -- point size: where the glyphs land inside a frame depends on the font's
+    -- ascender and on which characters are present, and a guess left the label
+    -- sitting below the stage dot.
+    --
+    -- The numbers baked in here were read back off a rendered canvas: the text
+    -- is drawn onto a black canvas at a known frame, the canvas is snapshotted
+    -- with hs.canvas:imageFromCanvas(), and the rows containing glyph pixels give
+    -- the real centre. There is no vertical alignment attribute in this build of
+    -- Hammerspoon, and hs.drawing.textSize does not exist in it either, so
+    -- measuring the pixels is the only way to know.
+    --
+    --   "recording" 13 system font, frame 15.2..30.8 -> glyphs 18..30, centre 24.0
+    --   "0:00"      12 system font, frame 15.8..30.2 -> glyphs 19..28, centre 23.5
+    --   "0:00"      12 Menlo,       frame 15.8..30.2 -> glyphs 17..27, centre 22.0
+    --
+    -- CY was 26, so the system font needs +2 and Menlo needs +4. TEXT_DY carries
+    -- the first as a default (-1, because CY - size*0.6 is already +2 from here),
+    -- and Menlo's extra 2 is CLOCK_DY.
+    local TEXT_DY = snum("VOXTYPE_TEXT_DY", -1)
+    local CLOCK_DY = 2.0
+    local function text_frame(x, w, size, text, dy)
+      local box = size * 1.2
+      return { x = x, y = CY - box / 2 + (dy or TEXT_DY), w = w, h = box }
     end
 
     local STAGE = {
@@ -415,9 +422,12 @@ do
           -- seconds tick over.
           textColor = { white = 1.0, alpha = 0.62 }, textSize = CLOCK_SZ,
           textFont = "Menlo",
+          -- Menlo sits higher in its frame than the system font does, so it
+          -- needs CLOCK_DY on top of TEXT_DY to share a centre line with the
+          -- label. Measured, not guessed: see text_frame.
           frame = text_frame(TIME_X, TIME_W, CLOCK_SZ,
             string.format("%d:%02d", math.floor(elapsed / 60),
-              math.floor(elapsed) % 60)),
+              math.floor(elapsed) % 60), TEXT_DY + CLOCK_DY),
           textAlignment = "right",
         }
       end
