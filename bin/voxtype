@@ -28,7 +28,13 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/voxtype"
 CONFIG_FILE="$CONFIG_DIR/config"
 CONFIG_KEYS="VOXTYPE_LANGUAGE VOXTYPE_SCRIPT VOXTYPE_WHISPER_MODEL
 VOXTYPE_OLLAMA_MODEL VOXTYPE_OLLAMA_URL VOXTYPE_OLLAMA_TIMEOUT
-VOXTYPE_MODEL_DIR VOXTYPE_NO_PASTE VOXTYPE_STATE_DIR"
+VOXTYPE_MODEL_DIR VOXTYPE_NO_PASTE VOXTYPE_STATE_DIR
+VOXTYPE_KEEP_RECORDINGS VOXTYPE_KEEP_MAX_MB"
+# The list is wrapped for reading, but the newlines inside the quotes are real
+# characters, and the check below looks for the name surrounded by spaces. So
+# flatten it first: without this, only the names on the first line matched and
+# every setting after it was rejected as unknown.
+CONFIG_KEYS_FLAT=$(printf '%s' "$CONFIG_KEYS" | tr '\n' ' ')
 
 load_config() {
     [ -f "$CONFIG_FILE" ] || return 0
@@ -269,6 +275,153 @@ ui_state() {
     return 0
 }
 
+# ------------------------------------------------------------------ recordings
+#
+# Keeping the audio is off by default. The promise elsewhere in this tool is
+# that speech is transcribed on the machine and then thrown away, and silently
+# retaining it would quietly make that false, so it is opt-in.
+#
+# When it is on, the most recent recordings are kept, each named with the time
+# it finished and a hash of its contents, with a sidecar recording what the
+# pipeline made of it. The hash is what makes the debug useful: two files with
+# the same digest are the same audio, so a duplicated paste or a re-run is
+# obvious at a glance.
+ARCHIVE_DIR="$STATE_DIR/recordings"
+KEEP_RECORDINGS="${VOXTYPE_KEEP_RECORDINGS:-0}"
+KEEP_MAX_MB="${VOXTYPE_KEEP_MAX_MB:-200}"
+
+keep_recordings() {
+    case "$KEEP_RECORDINGS" in
+        ''|*[!0-9]*) return 1 ;;
+        0) return 1 ;;
+    esac
+    return 0
+}
+
+file_hash() {
+    if have shasum; then
+        shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+    elif have openssl; then
+        openssl dgst -sha256 "$1" 2>/dev/null | awk '{print $NF}'
+    fi
+}
+
+# Deletes one kept recording and its sidecar.
+drop_recording() {
+    rm -f "$1" "${1%.wav}.json" 2>/dev/null
+}
+
+# Keeps the newest $KEEP_RECORDINGS, and then drops the oldest until the
+# directory is under $KEEP_MAX_MB. Count alone is not enough: fifty recordings
+# of an hour each is tens of gigabytes, and the failure mode of a debug feature
+# filling the disk is worse than losing old debug audio.
+prune_recordings() {
+    local files=("$ARCHIVE_DIR"/*.wav)
+    [ -e "${files[0]:-}" ] || return 0
+
+    local count=${#files[@]} i=0
+    while [ "$count" -gt "$KEEP_RECORDINGS" ] && [ "$i" -lt "${#files[@]}" ]; do
+        drop_recording "${files[$i]}"
+        i=$((i + 1))
+        count=$((count - 1))
+    done
+
+    local max=$((KEEP_MAX_MB * 1024 * 1024)) total=0 f size
+    files=("$ARCHIVE_DIR"/*.wav)
+    [ -e "${files[0]:-}" ] || return 0
+    for f in "${files[@]}"; do
+        size=$(wc -c < "$f" 2>/dev/null) || size=0
+        total=$((total + size))
+    done
+    i=0
+    while [ "$total" -gt "$max" ] && [ "$i" -lt "${#files[@]}" ]; do
+        f="${files[$i]}"
+        size=$(wc -c < "$f" 2>/dev/null) || size=0
+        drop_recording "$f"
+        total=$((total - size))
+        i=$((i + 1))
+    done
+    return 0
+}
+
+# archive_recording <wav> <mode> [raw] [clean]
+# Falls back to deleting the file, which is what happens when keeping is off.
+archive_recording() {
+    local wav="$1" mode="${2:-stopped}" raw="${3:-}" clean="${4:-}"
+    [ -f "$wav" ] || return 0
+    if ! keep_recordings; then
+        rm -f "$wav" 2>/dev/null
+        return 0
+    fi
+    mkdir -p "$ARCHIVE_DIR" 2>/dev/null || { rm -f "$wav" 2>/dev/null; return 0; }
+
+    local when stamp hash short base n=0
+    when=$(date '+%Y-%m-%d %H:%M:%S')
+    stamp=$(date '+%Y%m%d-%H%M%S')
+    hash=$(file_hash "$wav")
+    short="${hash:0:12}"
+    [ -n "$short" ] || short="nohash"
+    base="$stamp-$short"
+    # Two recordings inside the same second, which is easy when testing.
+    while [ -e "$ARCHIVE_DIR/$base.wav" ]; do
+        n=$((n + 1))
+        base="$stamp-$short-$n"
+    done
+
+    if ! mv -f "$wav" "$ARCHIVE_DIR/$base.wav" 2>/dev/null; then
+        rm -f "$wav" 2>/dev/null
+        return 0
+    fi
+
+    python3 - "$ARCHIVE_DIR/$base.json" "$when" "$hash" "$mode" \
+        "$KEEP_RECORDINGS" "$WHISPER_VARIANT" "$OLLAMA_MODEL" "${LANGUAGE:-auto}" \
+        "$raw" "$clean" <<'PY' 2>/dev/null
+import json, os, sys
+
+(path, when, digest, mode, keep, whisper, rewriter, language,
+ raw, clean) = sys.argv[1:11]
+
+json.dump({
+    "when": when,
+    "file": os.path.basename(path).replace(".json", ".wav"),
+    "sha256": digest,
+    "mode": mode,
+    "language": language,
+    "whisper": whisper,
+    "rewriter": rewriter,
+    "kept": int(keep),
+    "raw_transcript": raw,
+    "final_text": clean,
+}, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+PY
+    prune_recordings
+    return 0
+}
+
+cmd_recordings() {
+    if ! keep_recordings; then
+        echo "keeping recordings is off; enable it with:"
+        echo "  voxtype config set KEEP_RECORDINGS=50"
+        return 0
+    fi
+    local files=("$ARCHIVE_DIR"/*.wav)
+    [ -e "${files[0]:-}" ] || { echo "no recordings kept yet ($ARCHIVE_DIR)"; return 0; }
+    echo "keeping the last $KEEP_RECORDINGS, up to ${KEEP_MAX_MB}MB, in $ARCHIVE_DIR"
+    echo
+    local f size when
+    for f in "${files[@]}"; do
+        size=$(wc -c < "$f" 2>/dev/null) || size=0
+        when=$(python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1]))["when"], end="")
+except Exception:
+    print("-", end="")' "${f%.wav}.json" 2>/dev/null)
+        printf '  %s  %6s KB  %s\n' "$(basename "$f")" "$((size / 1024))" "$when"
+    done
+    echo
+    echo "each .wav has a .json beside it with the transcript the pipeline produced"
+}
+
 # ---------------------------------------------------------------- commands
 
 cmd_status() {
@@ -296,7 +449,9 @@ cmd_cancel() {
             sleep 0.05
         done
         kill -9 "$pid" 2>/dev/null
-        rm -f "$WAV"
+        # Kept too, marked as cancelled: "I cancelled and it still pasted" is
+        # exactly the kind of thing the audio is kept to debug.
+        archive_recording "$WAV" cancelled
         echo "cancelled"
     else
         echo "idle"
@@ -370,7 +525,11 @@ cmd_stop() {
     kill -9 "$pid" 2>/dev/null
     rm -f "$PIDFILE"
 
-    [ -s "$WAV" ] || { ui_state empty ""; die "recording was empty"; }
+    if [ ! -s "$WAV" ]; then
+        archive_recording "$WAV" empty
+        ui_state empty ""
+        die "recording was empty"
+    fi
 
     { hud "transcribing…"; } &
     local raw
@@ -379,7 +538,7 @@ cmd_stop() {
     raw=$(collapse_repeats "$raw")
 
     if [ -z "${raw//[[:space:]]/}" ]; then
-        rm -f "$WAV"
+        archive_recording "$WAV" no-speech
         { hud "nothing heard"; } &
         ui_state empty ""
         echo ""
@@ -391,7 +550,7 @@ cmd_stop() {
     local clean
     clean=$(reformat "$raw")
 
-    rm -f "$WAV"
+    archive_recording "$WAV" stopped "$raw" "$clean"
     ui_state "done" ""
     printf '%s' "$clean"
     printf '\n'
@@ -864,8 +1023,12 @@ print(t)
     if [ -n "$out" ]; then
         printf '%s' "$out"
     else
-        # Ollama down or failed: the raw transcript is still useful.
-        printf '%s' "$raw"
+        # Ollama down, or the rewrite was rejected. $ask is the transcript as it
+        # was handed to the rewriter: the raw text normally, or its
+        # transliteration when a Roman script was asked for. Falling back to
+        # $raw instead would hand back Devanagari to someone who asked for
+        # Hinglish, which is the one thing they said they did not want.
+        printf '%s' "$ask"
     fi
 }
 
@@ -889,7 +1052,7 @@ cmd_config() {
                 *) key="VOXTYPE_$key" ;;
             esac
             key=$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')
-            case " $CONFIG_KEYS " in
+            case " $CONFIG_KEYS_FLAT " in
                 *" $key "*) ;;
                 *) die "unknown setting '${key}'. Try: voxtype config" ;;
             esac
@@ -924,6 +1087,11 @@ timeout     : ${OLLAMA_TIMEOUT}s
 language    : ${LANGUAGE:-auto}
 script      : $script
 state dir   : $STATE_DIR
+recordings  : $(if keep_recordings; then
+    echo "keeping the last $KEEP_RECORDINGS (up to ${KEEP_MAX_MB}MB) in $ARCHIVE_DIR"
+  else
+    echo "not kept (enable with: voxtype config set KEEP_RECORDINGS=50)"
+  fi)
 config file : $CONFIG_FILE$([ -f "$CONFIG_FILE" ] && echo "" || echo " (none yet)")
 EOF
 }
@@ -1283,6 +1451,7 @@ usage: voxtype <command>
   restart       cancel, then start again
   status        report recording state
   config        show resolved settings; 'config set KEY=VALUE' stores one
+  recordings    list the recordings kept for debugging
   doctor        check the install and report what is missing
   warmup        pre-download the whisper model
   install-hint  print the two macOS permission steps
@@ -1361,6 +1530,7 @@ case "${1:-help}" in
         reformat "$(collapse_repeats "$(strip_tags "$(cat)")")"
         printf '\n'
         ;;
+    recordings)       cmd_recordings ;;
     help|-h|--help)   cmd_help ;;
     version|--version) echo "$VOXTYPE_VERSION" ;;
     *)

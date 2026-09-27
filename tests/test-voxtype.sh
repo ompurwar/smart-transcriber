@@ -563,12 +563,30 @@ try_guard() { # try_guard <model reply>
         VOXTYPE_STATE_DIR="$VOXTYPE_STATE_DIR" bash "$VOXTYPE" rewrite 2>/dev/null
 }
 
+# What the guard falls back to has to be the transliteration, not the raw
+# Devanagari: the whole point of asking for Roman script is that Devanagari is
+# not what should be pasted.
+has_devanagari() {
+    python3 -c 'import sys; sys.exit(0 if any("\u0900" <= c <= "\u097f" for c in sys.stdin.read()) else 1)'
+}
+roman_fallback() { # roman_fallback <name> <text>
+    case "$2" in
+        *namaste*) ;;
+        *) bad "$1" "no transliteration in the fallback: [$2]"; return ;;
+    esac
+    if printf '%s' "$2" | has_devanagari; then
+        bad "$1" "the fallback is still Devanagari: [$2]"
+    else
+        ok "$1"
+    fi
+}
+
 # The model translated instead of transliterating. Latin script, so a check for
-# Devanagari alone would wave it through; it must be caught and fall back.
-check "english back from hindi input is rejected" "$hindi_in" \
+# Devanagari alone would wave it through; it must be caught.
+roman_fallback "english back from hindi input is rejected and transliterated" \
     "$(try_guard 'Hello, this is a test. I will meet you at 7 tonight.')"
 # Devanagari back when Roman was asked for: also rejected.
-check "devanagari back from a roman request is rejected" "$hindi_in" \
+roman_fallback "devanagari back from a roman request is transliterated" \
     "$(try_guard 'नमस्ते यह एक परीक्षण है मैं कल मिलूँगा')"
 # A real Hinglish rewrite must survive the guard, or the guard would be worse
 # than the bug it is fixing.
@@ -809,7 +827,98 @@ out=$(VOXTYPE_MODEL_DIR="$HALF" VOXTYPE_STATE_DIR="$VOXTYPE_STATE_DIR" \
 contains "a half-downloaded model is not called ready" "incomplete" "$out"
 
 echo
-echo "installer"
+echo "recording archive"
+# Keeping the audio is opt-in, because the promise elsewhere is that speech is
+# transcribed and thrown away. When it is on, each recording is named with the
+# time it finished and a hash of its contents, with a sidecar saying what the
+# pipeline made of it.
+ARCH="$VOXTYPE_STATE_DIR/recordings"
+STUBREC="$TMP/stubrec"
+mkdir -p "$STUBREC"
+cat > "$STUBREC/rec" <<'STUB'
+#!/bin/bash
+out=""
+for a in "$@"; do out="$a"; done
+if [ -n "$out" ]; then
+    # A real wav, so the rest of the pipeline treats it like a live recording
+    # instead of failing to open it.
+    python3 -c '
+import struct, sys
+rate, ch, bits = 16000, 1, 16
+data = b"\x00" * (rate * ch * bits // 8)
+fmt = struct.pack("<HHIIHH", 1, ch, rate, rate * ch * bits // 8,
+                  ch * bits // 8, bits)
+hdr = b"RIFF" + struct.pack("<I", 4 + 8 + len(fmt) + 8 + len(data)) + b"WAVE"
+hdr += b"fmt " + struct.pack("<I", len(fmt)) + fmt
+hdr += b"data" + struct.pack("<I", len(data))
+open(sys.argv[1], "wb").write(hdr + data)
+' "$out"
+fi
+sleep 5
+STUB
+chmod +x "$STUBREC/rec"
+
+record_once() {
+    PATH="$STUBREC:$PATH" bash "$VOXTYPE" start >/dev/null 2>&1
+    sleep 0.4
+    PATH="$STUBREC:$PATH" VOXTYPE_NO_PASTE=1 bash "$VOXTYPE" stop >/dev/null 2>&1
+    sleep 0.3
+}
+
+rm -rf "$ARCH"
+record_once
+if [ -d "$ARCH" ] && [ -n "$(ls "$ARCH" 2>/dev/null)" ]; then
+    bad "keeping is off by default" "something was archived anyway"
+else
+    ok "keeping is off by default"
+fi
+
+rm -rf "$ARCH"
+VOXTYPE_KEEP_RECORDINGS=50 record_once
+kept_wav=$(ls "$ARCH"/*.wav 2>/dev/null | head -1)
+if [ -n "$kept_wav" ]; then
+    ok "a kept recording is archived"
+else
+    bad "a kept recording is archived" "nothing in $ARCH"
+fi
+if [ -f "${kept_wav%.wav}.json" ]; then
+    ok "and it has a sidecar"
+else
+    bad "and it has a sidecar" "no json beside the wav"
+fi
+sidecar=$(cat "${kept_wav%.wav}.json" 2>/dev/null)
+if printf '%s' "$sidecar" | grep -qE '"mode": "(stopped|no-speech|empty|cancelled)"'; then
+    ok "the sidecar records why the audio was kept"
+else
+    bad "the sidecar records why the audio was kept" "$sidecar"
+fi
+contains "the sidecar records the language"   "\"language\""       "$sidecar"
+contains "the sidecar records the transcript" "\"raw_transcript\"" "$sidecar"
+
+# The hash in the filename is the point of the filename: it makes two copies of
+# the same audio obvious.
+named_hash=$(basename "$kept_wav" | sed 's/^[0-9]\{8\}-[0-9]\{6\}-\([0-9a-f]*\)\.wav$/\1/')
+actual_hash=$(shasum -a 256 "$kept_wav" | awk '{print $1}')
+check "the name carries a hash of the audio" "${actual_hash:0:12}" "$named_hash"
+case "$(basename "$kept_wav")" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-*.wav)
+        ok "the name starts with the date and time" ;;
+    *) bad "the name starts with the date and time" "got $(basename "$kept_wav")" ;;
+esac
+
+# Rotation keeps the newest and stays in step with the sidecars.
+rm -rf "$ARCH"
+mkdir -p "$ARCH"
+for i in $(seq 1 5); do
+    printf 'RIFF' > "$ARCH/20260101-00000$i-00000000000$i.wav"
+    printf '{}'   > "$ARCH/20260101-00000$i-00000000000$i.json"
+done
+VOXTYPE_KEEP_RECORDINGS=3 record_once
+check "rotation keeps only the newest N" "3" "$(ls "$ARCH"/*.wav 2>/dev/null | wc -l | tr -d ' ')"
+check "and the sidecars stay in step"    "3" "$(ls "$ARCH"/*.json 2>/dev/null | wc -l | tr -d ' ')"
+rm -rf "$ARCH"
+
+
 for f in install.sh scripts/lib/common.sh scripts/preflight.sh scripts/setup-ollama.sh scripts/setup-app.sh tests/test-install.sh; do
     if bash -n "$ROOT/$f" 2>/dev/null; then ok "syntax: $f"; else bad "syntax: $f" "bash -n failed"; fi
 done

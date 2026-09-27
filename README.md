@@ -87,6 +87,7 @@ actually running, so it stays out of the way the rest of the time. See
 | `voxtype status` | report whether a recording is in progress |
 | `voxtype warmup` | pre-download the whisper model |
 | `voxtype config set KEY=VALUE` | store a setting so the hotkey sees it |
+| `voxtype recordings` | list the recordings kept for debugging |
 | `voxtype overlay` | show or change the overlay's size and look |
 | `voxtype install-hint` | print the permission steps again |
 
@@ -189,6 +190,39 @@ unaffected.
 > because it is a bit of an issue"*. `voxtype config set LANGUAGE=hi` switches
 > to the multilingual pair.
 
+### Keeping recordings for debugging
+
+By default the audio is deleted after each dictation. To keep the most recent
+ones — for working out why a transcript came out wrong — turn it on:
+
+```bash
+voxtype config set KEEP_RECORDINGS=50    # 0 is the default: keep nothing
+voxtype config set KEEP_MAX_MB=200       # stop the directory growing past this
+voxtype recordings                       # list what is being kept
+```
+
+Each recording is stored in `~/.cache/voxtype/recordings` under a name built
+from the time it finished and the first 12 characters of its sha256, with a
+`.json` beside it holding what the pipeline made of it:
+
+```
+20260928-001111-9bc9f6b4b45f.wav
+20260928-001111-9bc9f6b4b45f.json
+
+{ "when": "2026-09-28 00:11:11",
+  "sha256": "9bc9f6b4b45f...",
+  "mode": "stopped",              // or cancelled, no-speech, empty
+  "language": "hi", "whisper": "small", "rewriter": "qwen2.5:7b",
+  "raw_transcript": "...", "final_text": "..." }
+```
+
+The hash in the name is what makes this useful: two files with the same digest
+are the same audio, so a doubled paste or a re-run is obvious at a glance.
+
+**This keeps your speech on disk**, which the rest of this tool is careful not
+to do. It is off unless you ask for it, and `voxtype recordings` exists so you
+can see what is there. Delete the directory to be rid of it.
+
 ### The overlay
 
 While you dictate, a small pill appears at the bottom of the screen with a
@@ -251,9 +285,12 @@ Apache-2.0.
 
 - Audio is captured by `sox` and transcribed by a CoreML model on your Mac.
 - The transcript is sent to `http://localhost:11434` and nowhere else.
-- Nothing is written anywhere except `~/.cache/voxtype` (a temporary wav, deleted
-  after each dictation), `~/.cache/hammerspoon` and the whisper model's own cache
-  directory, which is under `~/Documents/huggingface` on a default install.
+- Nothing is written anywhere except `~/.cache/voxtype` (a temporary wav),
+  `~/.cache/hammerspoon` and the whisper model's own cache directory, which is
+  under `~/Documents/huggingface` on a default install.
+- That temporary wav is deleted after each dictation, unless you turn on
+  [keeping recordings](#keeping-recordings-for-debugging), which stores the most
+  recent ones as audio files in `~/.cache/voxtype/recordings`.
 
 If you want proof, unplug the network. It keeps working.
 
