@@ -49,6 +49,9 @@
   canvas and reading the glyph rows back with `imageFromCanvas`; the label and
   the clock both land dead on the midline. Menlo, used for the clock's digits,
   sits 2px higher in its frame than the system font and gets its own nudge.
+- The pill's end insets are settable (`VOXTYPE_PAD_L`, `VOXTYPE_PAD_R`) and the
+  left one is a little wider than the right, which is what stops the dot's side
+  looking tighter than the clock's.
 
 ## v0.1.0
 

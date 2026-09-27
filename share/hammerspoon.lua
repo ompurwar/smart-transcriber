@@ -150,15 +150,24 @@ do
     local MAX_H  = num("VOXTYPE_WAVE_H", 36)
     local BARS   = math.floor(num("VOXTYPE_BARS", 24))
     local LABEL_SZ, CLOCK_SZ = 13, 12
-    local DOT_X, DOT_R = 20, 4.5
+    -- The inset at each end of the pill. The dot starts after the left one and
+    -- the clock, being right aligned, finishes before the right one. They are
+    -- separate settings because they do not want the same value: the clock has
+    -- the waveform running up to it, so a little more air on the dot's side looks
+    -- even while the same number on the clock's side looks tight.
+    local PAD_L = num("VOXTYPE_PAD_L", 26)
+    local PAD_R = num("VOXTYPE_PAD_R", 20)
+    local DOT_X, DOT_R = PAD_L, 4.5
     -- The widest label is "nothing heard" at about 84px; the old 112 reserved
     -- space for "on your clipboard", which is now the shorter "copied". The
     -- width saved here is given to the waveform, which is the part worth
     -- looking at.
-    local LABEL_X, LABEL_W = 32, 98
+    local LABEL_X, LABEL_W = PAD_L + 12, 98
     local WAV_X = 140
-    local TIME_X, TIME_W = PILL_W - 44, 34
+    local TIME_W = 34
+    local TIME_X = PILL_W - PAD_R - TIME_W
     local WAV_W = TIME_X - WAV_X - 10
+
     local CY = PILL_H / 2
     local BAR_MS = 16      -- of audio behind each bar, so the bars trace the
                            -- shape of speech instead of flickering sample to

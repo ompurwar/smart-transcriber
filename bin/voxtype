@@ -961,7 +961,7 @@ PY
 # Hammerspoon is launched by launchd, so a new environment variable would need a
 # logout, while a conf file only needs Hammerspoon reloaded.
 OVERLAY_CONF="$STATE_DIR/overlay.conf"
-OVERLAY_KEYS="VOXTYPE_PILL_W VOXTYPE_PILL_H VOXTYPE_PILL_R VOXTYPE_WAVE_H VOXTYPE_BARS VOXTYPE_TEXT_DY"
+OVERLAY_KEYS="VOXTYPE_PILL_W VOXTYPE_PILL_H VOXTYPE_PILL_R VOXTYPE_WAVE_H VOXTYPE_BARS VOXTYPE_PAD_L VOXTYPE_PAD_R VOXTYPE_TEXT_DY"
 # The one setting that is a correction rather than a measurement, so a negative
 # value is the normal case for it and a positive one would be the surprise.
 OVERLAY_SIGNED=" VOXTYPE_TEXT_DY "
@@ -1061,6 +1061,8 @@ cmd_overlay() {
         VOXTYPE_PILL_R  "${VOXTYPE_PILL_R:-26}" \
         VOXTYPE_WAVE_H  "${VOXTYPE_WAVE_H:-36}" \
         VOXTYPE_BARS    "${VOXTYPE_BARS:-24}" \
+        VOXTYPE_PAD_L   "${VOXTYPE_PAD_L:-26}" \
+        VOXTYPE_PAD_R   "${VOXTYPE_PAD_R:-20}" \
         VOXTYPE_TEXT_DY "${VOXTYPE_TEXT_DY:--1}"
     if [ -f "$OVERLAY_CONF" ]; then
         echo

@@ -186,6 +186,8 @@ voxtype overlay reset                       # back to the defaults
 | `VOXTYPE_PILL_R` | half the height | corner radius; the default is a full pill shape |
 | `VOXTYPE_WAVE_H` | `36` | tallest waveform bar |
 | `VOXTYPE_BARS` | `24` | how many bars |
+| `VOXTYPE_PAD_L` | `26` | inset on the left, where the dot starts |
+| `VOXTYPE_PAD_R` | `20` | inset on the right, where the clock finishes |
 | `VOXTYPE_TEXT_DY` | `-1` | nudge the label and clock; the default is where they measured centred |
 
 These are written to `~/.cache/voxtype/overlay.conf`. The same names work as

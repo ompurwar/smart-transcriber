@@ -413,7 +413,7 @@ echo "overlay tuning"
 # until the next login.
 OVL="$VOXTYPE_STATE_DIR/overlay.conf"
 rm -f "$OVL"
-for k in VOXTYPE_PILL_W VOXTYPE_PILL_H VOXTYPE_PILL_R VOXTYPE_WAVE_H VOXTYPE_BARS VOXTYPE_TEXT_DY; do
+for k in VOXTYPE_PILL_W VOXTYPE_PILL_H VOXTYPE_PILL_R VOXTYPE_WAVE_H VOXTYPE_BARS VOXTYPE_PAD_L VOXTYPE_PAD_R VOXTYPE_TEXT_DY; do
     if grep -q "$k" "$VOXTYPE"; then
         ok "voxtype knows $k"
     else
