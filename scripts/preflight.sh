@@ -66,14 +66,16 @@ check_network() {
         ok "network reachable"
         return 0
     fi
-    die "cannot reach github.com. voxtype downloads Homebrew, dependencies and about 2.5 GB of models, so it needs a working connection. Re-run when you are online, or pass --no-deps --no-models to install only the script."
+    die "cannot reach github.com. voxtype downloads Homebrew, dependencies and about 5.5 GB of models, so it needs a working connection. Re-run when you are online, or pass --no-deps --no-models to install only the script."
 }
 
 # The models are the biggest thing we download, so fail before starting rather
-# than 20 minutes in.
+# than 20 minutes in. The default rewrite model is qwen2.5:7b at roughly 4.7 GB,
+# plus the whisper model, so the bar is higher than it used to be. A user who
+# picks a smaller model needs less, which the alternatives below point out.
 check_disk() {
     [ "${DO_MODELS:-1}" = "1" ] || return 0
-    local need=4 avail
+    local need=7 avail
     avail=$(free_gb "$HOME")
     case "$avail" in
         ''|*[!0-9.]*) warn "could not determine free disk space; continuing"; return 0 ;;
@@ -86,7 +88,8 @@ check_disk() {
         info "  - free up space and re-run"
         info "  - install without the models now:  --no-models"
         info "    (then run 'voxtype warmup' later, once there is room)"
-        info "  - use a smaller rewrite model:     VOXTYPE_OLLAMA_MODEL=qwen2.5:0.5b"
+        info "  - use a smaller rewrite model:     VOXTYPE_OLLAMA_MODEL=qwen2.5:1.5b"
+        info "    (about 1 GB instead of ${need} GB; both are Apache-2.0)"
         printf '\n'
         [ "${DRY_RUN:-0}" = "1" ] && return 0
         exit 1

@@ -48,7 +48,7 @@ contains "unknown command hints" "try: voxtype help" "$(bash "$VOXTYPE" nonsense
 echo
 echo "config"
 contains "config shows version"  "version     : 0.1.0" "$(bash "$VOXTYPE" config)"
-contains "config shows ollama"   "qwen2.5:3b"         "$(bash "$VOXTYPE" config)"
+contains "config shows ollama"   "qwen2.5:7b"         "$(bash "$VOXTYPE" config)"
 
 echo
 echo "install-hint"

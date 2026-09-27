@@ -5,8 +5,6 @@ class Voxtype < Formula
   version "0.1.0"
   license "MIT"
 
-  desc "Local voice typing. Transcribes on-device with WhisperKit, rewrites with Ollama."
-
   depends_on "sox"
   depends_on "python3"
 
@@ -37,7 +35,7 @@ class Voxtype < Formula
 
       Pull the local rewrite model once:
 
-        ollama pull qwen2.5:3b
+        ollama pull qwen2.5:7b
         voxtype warmup
 
       Check the install at any time:

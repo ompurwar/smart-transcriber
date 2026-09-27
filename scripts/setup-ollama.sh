@@ -46,8 +46,8 @@ setup_ollama() {
         fi
     fi
 
-    # --no-models means no model downloads, and this is a 2 GB download, so it
-    # has to be honoured here as well as for the whisper warmup.
+    # --no-models means no model downloads, and this is a multi-GB download, so
+    # it has to be honoured here as well as for the whisper warmup.
     if [ "${DO_MODELS:-1}" != "1" ]; then
         info "not pulling '$REWRITE_MODEL' (--no-models)"
         info "when you want it:  ollama pull $REWRITE_MODEL"
@@ -59,7 +59,7 @@ setup_ollama() {
         return 0
     fi
 
-    info "pulling '$REWRITE_MODEL' (about 2 GB, one time)…"
+    info "pulling '$REWRITE_MODEL' (about 5 GB, one time)…"
     if [ "${DRY_RUN:-0}" = "1" ]; then
         info "would run: ollama pull $REWRITE_MODEL"
         return 0

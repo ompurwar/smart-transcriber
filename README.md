@@ -78,7 +78,8 @@ appears after roughly two seconds.
 ## Requirements
 
 - macOS on Apple Silicon. `whisperkit-cli` is not published for Intel.
-- About 2.5 GB of downloads: ~1 GB for the whisper model, ~2 GB for `qwen2.5:3b`.
+- About 5.5 GB of downloads: ~500 MB for the whisper model, ~4.7 GB for `qwen2.5:7b`.
+- About 7 GB of free disk space is required before the models are downloaded.
 - First dictation after install is slow while models load into memory.
 
 ## Configuration
@@ -89,7 +90,7 @@ Everything is environment variables, so you can set them in your shell profile.
 | --- | --- | --- |
 | `VOXTYPE_LANGUAGE` | `en` | set empty for auto-detect |
 | `VOXTYPE_WHISPER_MODEL` | `small.en` | `tiny.en`, `base.en`, `small.en`, `medium.en` |
-| `VOXTYPE_OLLAMA_MODEL` | `qwen2.5:3b` | see the table below |
+| `VOXTYPE_OLLAMA_MODEL` | `qwen2.5:7b` | see the model notes below |
 | `VOXTYPE_OLLAMA_URL` | `http://localhost:11434/api/generate` | point at a remote box if you like |
 | `VOXTYPE_OLLAMA_TIMEOUT` | `90` | seconds before falling back to the raw transcript |
 | `VOXTYPE_MODEL_DIR` | discovered | override the whisper model path |
@@ -103,9 +104,15 @@ ollama pull qwen3:4b
 export VOXTYPE_OLLAMA_MODEL=qwen3:4b
 ```
 
-Measured on an M-series Mac, short dictations: `qwen2.5:3b` is the best
-speed/quality balance, `qwen3:1.7b` is faster and sloppier, `qwen2.5:7b` is
-measurably better on long sentences and noticeably slower.
+The default is `qwen2.5:7b`. Measured on an M-series Mac: it is measurably
+better than smaller models on long sentences and noticeably slower. If you want
+a lighter setup, `qwen2.5:1.5b` is about 1 GB instead of 4.7 GB.
+
+> **Do not use `qwen2.5:3b` commercially.** The 3B sizes are the only Qwen2.5
+> models published under the Qwen Research License, which is non-commercial only
+> and requires a separate license from Alibaba for commercial use. Every other
+> Qwen2.5 size, including the 7B default here, is Apache-2.0. Check any
+> replacement model's license before using it at work.
 
 ## Privacy
 
@@ -152,6 +159,25 @@ share them. The printed output tells you how to remove those too.
 tests/test-voxtype.sh    # unit tests, no models or network needed
 shellcheck install.sh bin/voxtype scripts/lib/*.sh scripts/*.sh
 ```
+
+## Third-party components
+
+voxtype ships two files, both original MIT-licensed work: the CLI and the
+Hammerspoon module. It does not vendor, bundle, link or embed any third-party
+code. Every dependency is a separate program, installed independently and run as
+a child process, which is why the copyleft terms of SoX do not extend to it.
+
+| Component | License |
+| --- | --- |
+| SoX | GPL-2.0-or-later and LGPL-2.1-or-later |
+| whisperkit-cli (WhisperKit) | MIT |
+| Ollama | MIT |
+| Hammerspoon | MIT |
+| Python | PSF License |
+| openai/whisper-small.en | Apache-2.0 |
+| Qwen2.5-7B (default rewrite model) | Apache-2.0 |
+
+Full details in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## License
 

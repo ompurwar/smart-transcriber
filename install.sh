@@ -19,7 +19,7 @@ BIN_DIR="${VOXTYPE_BIN_DIR:-$HOME/.local/bin}"
 # Where the Hammerspoon module is kept on disk, so that 'voxtype
 # install-hammerspoon' works with only the installed binary present.
 SHARE_DIR="${VOXTYPE_SHARE_DIR:-${BIN_DIR%/}/../share/voxtype}"
-REWRITE_MODEL="${VOXTYPE_OLLAMA_MODEL:-qwen2.5:3b}"
+REWRITE_MODEL="${VOXTYPE_OLLAMA_MODEL:-qwen2.5:7b}"
 WHISPER_MODEL="${VOXTYPE_WHISPER_MODEL:-small.en}"
 
 DO_MODELS=1
@@ -267,7 +267,7 @@ do_uninstall() {
 voxtype is gone. These were left in place because other tools may use them:
 
   ~/.cache/whisperkit            the whisper model (about 1 GB)
-  ollama list                     downloaded models (${REWRITE_MODEL} is about 2 GB)
+  ollama list                     downloaded models (${REWRITE_MODEL} is about 5 GB)
   Hammerspoon itself
 
 To remove the models too:

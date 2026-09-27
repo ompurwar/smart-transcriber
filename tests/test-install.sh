@@ -314,10 +314,10 @@ H=$(fresh nomodels)
 run "$H" --no-models
 contains "--no-models says how to finish later" "voxtype warmup" "$OUT"
 
-# --no-models must also skip the 2 GB ollama pull, not just the whisper warmup.
+# --no-models must also skip the multi-GB ollama pull, not just the whisper warmup.
 # A stub ollama records whether it was ever asked to pull.
 echo
-echo "--no-models skips the 2 GB ollama pull"
+echo "--no-models skips the big ollama pull"
 H=$(fresh nopull)
 mkdir -p "$H/stub"
 cat > "$H/stub/ollama" <<'STUB'
