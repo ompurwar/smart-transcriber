@@ -122,6 +122,64 @@ fetch_repo() {
     return 0
 }
 
+# Work out which release is being installed.
+#
+# The version used to be a number hardcoded in bin/voxtype, copied into the
+# Homebrew formula by hand, so a curl install from a branch reported 0.1.0
+# forever while the formula stamped the real tag. The formula now rewrites the
+# value at install time, and this does the same for a curl install, so both
+# paths report something true.
+#
+# A tag checkout is unambiguous. A branch has no version of its own, so report
+# the most recent tag and say it is a branch build rather than inventing one.
+#
+# Runs before the library is sourced, so no have/info/warn here.
+detected_version=""
+detect_version() {
+    local tags
+    case "$REPO_REF" in
+        v[0-9]*)
+            detected_version="${REPO_REF#v}"
+            return 0 ;;
+    esac
+
+    command -v git >/dev/null 2>&1 || return 1
+
+    tags=$(git ls-remote --tags --refs "$REPO_URL" 2>/dev/null |
+        cut -f2 | sed 's|refs/tags/||' | grep '^v[0-9]' | sort -V)
+    [ -n "$tags" ] || return 1
+
+    detected_version="${tags##*$'\n'}"
+    detected_version="${detected_version#v}"
+    # A branch build, so say so rather than passing the tag off as an exact
+    # match for whatever is checked out.
+    detected_version="$detected_version+$(printf '%s' "$REPO_REF" | tr -c 'A-Za-z0-9._-' '-')"
+    return 0
+}
+
+# Write the detected version into the copy about to be installed. The repo copy
+# is left alone, so a later install still stamps whatever it detects then.
+#
+# cat over the original rather than mv a temp file, because mv would replace
+# the inode and lose the executable bit.
+stamp_version() {
+    local file="$1" want="$2" tmp
+    [ -n "$want" ] || return 0
+    [ -f "$file" ] || return 0
+    grep -q '^VOXTYPE_VERSION=' "$file" 2>/dev/null || return 0
+
+    tmp=$(mktemp 2>/dev/null) || return 0
+    if awk -v v="$want" '
+        /^VOXTYPE_VERSION="/ { print "VOXTYPE_VERSION=\"" v "\""; next }
+        { print }
+    ' "$file" > "$tmp" 2>/dev/null && cat "$tmp" > "$file" 2>/dev/null; then
+        rm -f "$tmp"
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
+
 SELF="${BASH_SOURCE[0]:-$0}"
 if [ -f "$SELF" ] && grep -q "smart-transcriber installer" "$SELF" 2>/dev/null; then
     REPO_ROOT="$(cd "$(dirname "$SELF")" && pwd)"
@@ -319,6 +377,8 @@ main() {
             info "install them with: brew install sox whisperkit-cli"
         fi
     fi
+
+    detect_version || true
 
     install_binary
 

@@ -11,9 +11,10 @@
 
 set -uo pipefail
 
-# Overwritten by the Homebrew formula at install time, so the installed binary
-# always reports the tag it was built from. The value below is what a curl
-# install from a branch gets, where there is no tag to read.
+# Rewritten at install time by both the Homebrew formula and install.sh, so the
+# installed binary reports the release it was built from rather than whatever
+# number happened to be committed here. The value below is the fallback for
+# running straight out of a clone with neither installer.
 VOXTYPE_VERSION="0.1.0"
 
 STATE_DIR="${VOXTYPE_STATE_DIR:-$HOME/.cache/voxtype}"

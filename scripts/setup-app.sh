@@ -20,12 +20,24 @@ install_binary() {
     fi
 
     if [ "${DRY_RUN:-0}" = "1" ]; then
-        info "would install $src -> $BIN_DIR/voxtype"
+        if [ -n "$detected_version" ]; then
+            info "would install $src -> $BIN_DIR/voxtype (version $detected_version)"
+        else
+            info "would install $src -> $BIN_DIR/voxtype"
+        fi
     else
         install -m 0755 "$src" "$BIN_DIR/voxtype" || die "could not write $BIN_DIR/voxtype"
+        # Stamp the installed copy, not $src. Stamping the source edited the
+        # repo checkout in place, so a second install inherited the first
+        # install's version.
+        stamp_version "$BIN_DIR/voxtype" "$detected_version"
         state_set BIN_OWNED 1
         state_set BIN_PATH "$BIN_DIR/voxtype"
-        ok "$BIN_DIR/voxtype"
+        if [ -n "$detected_version" ]; then
+            ok "$BIN_DIR/voxtype (version $detected_version)"
+        else
+            ok "$BIN_DIR/voxtype"
+        fi
         note_change "installed $BIN_DIR/voxtype"
     fi
 

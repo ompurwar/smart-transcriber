@@ -635,6 +635,58 @@ else
 fi
 
 echo
+echo "the installed binary reports a real version"
+# A curl install used to report the number hardcoded in bin/voxtype, so every
+# install from a branch claimed to be 0.1.0 no matter what was actually
+# installed. install.sh now stamps the detected version, the way the formula
+# does, and a tag checkout has to come out exact.
+
+H=$(fresh vstamp-tag)
+OUT=$(cd "$ROOT" && env HOME="$H" PATH="$BASE_PATH" VOXTYPE_HEADLESS=1 \
+    VOXTYPE_BIN_DIR="$H/bin" VOXTYPE_INSTALL_STATE="$H/state/install-state" \
+    VOXTYPE_REF=v9.9.9 /bin/bash install.sh --no-deps --no-models 2>&1)
+RC=$?
+check_rc "a tag ref installs" 0 "$RC"
+V=$("$H/bin/voxtype" version 2>/dev/null)
+if [ "$V" = "9.9.9" ]; then
+    ok "a tag ref is reported exactly (got $V)"
+else
+    bad "a tag ref is reported exactly" "got '$V', wanted '9.9.9'"
+fi
+
+# The stamp must not cost the executable bit. Writing a temp file and moving it
+# over the original would, and a non-executable voxtype is a broken install
+# that still passes a file-exists check.
+if [ -x "$H/bin/voxtype" ]; then
+    ok "the stamped binary is still executable"
+else
+    bad "the stamped binary is still executable" "lost the executable bit"
+fi
+
+# The repo copy must not accumulate stamps, or a later install would inherit
+# whatever the previous one wrote.
+if grep -q '^VOXTYPE_VERSION="9.9.9"' "$ROOT/bin/voxtype" 2>/dev/null; then
+    bad "the repo copy is not stamped" "bin/voxtype in the repo now says 9.9.9"
+else
+    ok "the repo copy is not stamped"
+fi
+
+# An offline machine cannot reach the tag list. That must degrade to the
+# fallback rather than abort the install.
+H=$(fresh vstamp-offline)
+OUT=$(cd "$ROOT" && env HOME="$H" PATH="$BASE_PATH" VOXTYPE_HEADLESS=1 \
+    VOXTYPE_BIN_DIR="$H/bin" VOXTYPE_INSTALL_STATE="$H/state/install-state" \
+    VOXTYPE_REF=main VOXTYPE_REPO_URL=https://github.com/ompurwar/definitely-not-a-repo-xyz \
+    /bin/bash install.sh --no-deps --no-models 2>&1)
+RC=$?
+check_rc "an unreachable repo url still installs" 0 "$RC"
+if [ -x "$H/bin/voxtype" ]; then
+    ok "the binary is installed even when no version is detected"
+else
+    bad "the binary is installed even when no version is detected" "missing"
+fi
+
+echo
 if [ "$fail" -eq 0 ]; then
     printf '\033[32m%d passed, 0 failed\033[0m\n' "$pass"
     exit 0
