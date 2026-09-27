@@ -20,6 +20,12 @@ class Voxtype < Formula
   def install
     bin.install "bin/voxtype"
     pkgshare.install "share/hammerspoon.lua"
+
+    # Stamp the tag into the binary. The version used to be hardcoded in the
+    # script and copied into the formula by hand, so the two drifted apart and
+    # the installed binary reported 0.1.0 from a 0.1.1 keg. The tag is the only
+    # place the version should be written down.
+    inreplace bin/"voxtype", /^VOXTYPE_VERSION=".*"$/, "VOXTYPE_VERSION=\"#{version}\""
   end
 
   def caveats
