@@ -15,19 +15,41 @@ jobs:
         run: brew install shellcheck
 
       - name: Lint
-        run: shellcheck -S warning install.sh bin/voxtype scripts/lib/common.sh scripts/setup-ollama.sh scripts/setup-app.sh tests/test-voxtype.sh
+        run: shellcheck -S warning install.sh bin/voxtype scripts/lib/common.sh scripts/preflight.sh scripts/setup-ollama.sh scripts/setup-app.sh tests/test-voxtype.sh tests/test-install.sh
 
       - name: Syntax check
         run: |
-          for f in install.sh bin/voxtype scripts/lib/common.sh scripts/setup-ollama.sh scripts/setup-app.sh tests/test-voxtype.sh; do
+          for f in install.sh bin/voxtype scripts/lib/common.sh scripts/preflight.sh scripts/setup-ollama.sh scripts/setup-app.sh tests/test-voxtype.sh tests/test-install.sh; do
             bash -n "$f"
           done
 
       - name: Unit tests
         run: bash tests/test-voxtype.sh
 
+      # A runner has no GUI login session, so these must be skipped rather than
+      # attempted. If a case ever starts editing login items, the run would fail
+      # on the runner instead of quietly touching a real user's Mac.
+      - name: Installer edge cases
+        env:
+          VOXTYPE_HEADLESS: "1"
+        run: bash tests/test-install.sh
+
       - name: Dry run the installer
         run: bash install.sh --dry-run --no-models
+
+      # The one-line install every new user runs, through a pipe, with the real
+      # network and a sandboxed HOME.
+      - name: Piped install
+        env:
+          VOXTYPE_HEADLESS: "1"
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/home"
+          export VOXTYPE_HEADLESS=1
+          mkdir -p "$HOME"
+          curl -fsSL "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/raw/$GITHUB_SHA/install.sh" | bash -s -- --no-deps --no-models
+          test -x "$HOME/.local/bin/voxtype"
+          "$HOME/.local/bin/voxtype" version
 
   formula:
     runs-on: macos-14

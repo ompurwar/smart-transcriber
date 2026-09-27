@@ -242,10 +242,20 @@ while IFS= read -r f; do pyfiles+=("$f"); done < <(find "$ROOT" -type f \
 suspect=$(python3 - "$ROOT" <<'PYU'
 import pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
-pat = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[^\x00-\x7f]")
+
+# Only an *unbraced* $VAR followed by a multi-byte character is the bug. Bash
+# reads the following byte as part of the variable name, so $REPO_URL<ellipsis>
+# asks for a variable literally called "REPO_URL<ellipsis>" and dies with
+# "unbound variable" under set -u. ${label}<ellipsis> is fine, because the
+# closing brace ends the name and the ellipsis is ordinary output text.
+pat = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]")
+
 out = []
 for f in sorted(root.rglob("*")):
     if f.is_dir() or ".git" in f.parts:
+        continue
+    # This file holds the bad form on purpose, as a self-test below.
+    if f.name == "test-voxtype.sh":
         continue
     if not (f.suffix in {".sh", ".lua", ".rb", ".yml"} or f.name == "voxtype"):
         continue
@@ -259,9 +269,28 @@ print("\n".join(out))
 PYU
 )
 if [ -z "$suspect" ]; then
-    ok "no unicode after a shell variable"
+    ok "no unbraced \$VAR before a multi-byte character"
 else
-    bad "no unicode after a shell variable" "found at: $(echo "$suspect" | tr '\n' ' ')"
+    bad "no unbraced \$VAR before a multi-byte character" "found at: $(echo "$suspect" | tr '\n' ' ')"
+fi
+
+# The guard above is the only thing standing between this bug and a release, so
+# check that it still recognises both the bad form and the safe one.
+if python3 - <<'PYU'
+import re, sys
+pat = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]")
+bad_forms = ['git clone "$REPO_URL…" done', "echo $FOO\u2026", "cp $TMP_X\u00b7"]
+good_forms = ['info "installing ${label}…"', 'echo "$DIR/voxtype"', 'echo "${A}…"',
+              'echo "cost: $5.00"', 'echo "${X}"']
+if any(not pat.search(s) for s in bad_forms):
+    sys.exit(1)
+if any(pat.search(s) for s in good_forms):
+    sys.exit(1)
+PYU
+then
+    ok "the multi-byte guard catches the bug and spares the safe forms"
+else
+    bad "the multi-byte guard catches the bug and spares the safe forms" "regex is wrong"
 fi
 
 echo

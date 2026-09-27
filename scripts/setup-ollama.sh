@@ -25,6 +25,9 @@ setup_ollama() {
 
     if ollama list >/dev/null 2>&1; then
         ok "ollama is running"
+    elif [ "${VOXTYPE_HEADLESS:-0}" = "1" ]; then
+        # Nothing here needs a running daemon when no models are being pulled.
+        [ "${DO_MODELS:-1}" = "1" ] && warn "headless: not launching Ollama.app"
     else
         info "starting the Ollama app…"
         if [ "${DRY_RUN:-0}" = "1" ]; then
@@ -41,6 +44,14 @@ setup_ollama() {
         else
             warn "ollama is not answering. Open Ollama.app manually, then re-run voxtype doctor."
         fi
+    fi
+
+    # --no-models means no model downloads, and this is a 2 GB download, so it
+    # has to be honoured here as well as for the whisper warmup.
+    if [ "${DO_MODELS:-1}" != "1" ]; then
+        info "not pulling '$REWRITE_MODEL' (--no-models)"
+        info "when you want it:  ollama pull $REWRITE_MODEL"
+        return 0
     fi
 
     if ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$REWRITE_MODEL"; then
