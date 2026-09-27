@@ -15,9 +15,26 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SANDBOX="$(mktemp -d)"
-trap 'rm -rf "$SANDBOX"' EXIT
 
 BASE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+
+# Guard against this suite ever writing to the developer's real Hammerspoon
+# config. An earlier draft called 'voxtype install-hammerspoon' without passing
+# HOME, which rewrote ~/.hammerspoon/voxtype.lua with a sandboxed binary path
+# baked in and silently broke the real hotkeys.
+REAL_MODULE="$HOME/.hammerspoon/voxtype.lua"
+real_module_stamp() {
+    [ -f "$REAL_MODULE" ] && cksum "$REAL_MODULE" 2>/dev/null || echo "absent"
+}
+REAL_STAMP="$(real_module_stamp)"
+check_no_leak() {
+    local now; now="$(real_module_stamp)"
+    if [ "$now" != "$REAL_STAMP" ]; then
+        printf '\n\033[31mLEAK\033[0m this suite modified %s\n' "$REAL_MODULE" >&2
+        printf '      restore it with: voxtype install-hammerspoon\n' >&2
+    fi
+}
+trap 'rm -rf "$SANDBOX"; check_no_leak' EXIT
 
 pass=0
 fail=0
@@ -562,6 +579,59 @@ if grep -q 'hotkeys loaded' "$H/.cache/voxtype/hs.log.1"; then
     ok "the old log is kept for debugging"
 else
     bad "the old log is kept for debugging" "hs.log.1 lost the history"
+fi
+
+echo
+echo "the module is usable without the repo"
+# The installer and the README both tell a user who skipped the hotkeys to run
+# 'voxtype install-hammerspoon' later. That only works if the module was written
+# to disk somewhere. It used to be read from $VOXTYPE_SHARE_DIR, which only the
+# installer ever set, so the command died with an unbound variable.
+H=$(fresh share)
+run "$H"
+if [ -f "$H/share/voxtype/hammerspoon.lua" ]; then
+    ok "the module is installed next to the binary"
+else
+    bad "the module is installed next to the binary" "nothing under $H/share"
+fi
+# Remove what the installer already wrote, so the assertions below can only be
+# satisfied by the standalone command itself.
+rm -f "$H/.hammerspoon/voxtype.lua"
+# HOME must be passed here. The command writes to $HOME/.hammerspoon, so calling
+# it without HOME rewrites the developer's real Hammerspoon config and bakes a
+# sandbox path into it.
+OUT=$(env HOME="$H" "$H/bin/voxtype" install-hammerspoon 2>&1); RC=$?
+check_rc "'voxtype install-hammerspoon' works on its own" 0 "$RC"
+if [ -f "$H/.hammerspoon/voxtype.lua" ]; then
+    ok "the standalone command wrote the hotkey module"
+else
+    bad "the standalone command wrote the hotkey module" "missing"
+fi
+# It must point at the binary it was installed alongside, not a fixed guess.
+file_has "$H/.hammerspoon/voxtype.lua" "$H/bin/voxtype" "the module points at the installed binary"
+lacks "the standalone command does not trip over an unset variable" "unbound variable"
+lacks "the standalone command does not need VOXTYPE_SHARE_DIR" "VOXTYPE_SHARE_DIR"
+
+# It must also work with no repo and no VOXTYPE_* env at all, which is how a
+# user would actually type it.
+rm -f "$H/.hammerspoon/voxtype.lua"
+OUT=$(env HOME="$H" "$H/bin/voxtype" install-hammerspoon 2>&1); RC=$?
+check_rc "it works with a bare environment" 0 "$RC"
+if [ -f "$H/.hammerspoon/voxtype.lua" ]; then
+    ok "a bare environment still writes the module"
+else
+    bad "a bare environment still writes the module" "missing"
+fi
+
+echo
+echo "uninstall takes the module with it"
+H=$(fresh unshshare)
+run "$H"
+run "$H" --uninstall
+if [ -f "$H/share/voxtype/hammerspoon.lua" ]; then
+    bad "uninstall removes the installed module" "still present"
+else
+    ok "uninstall removes the installed module"
 fi
 
 echo

@@ -29,6 +29,26 @@ install_binary() {
         note_change "installed $BIN_DIR/voxtype"
     fi
 
+    # The Hammerspoon module has to live somewhere on disk, not just in this
+    # repo, or 'voxtype install-hammerspoon' cannot work for a user who only has
+    # the installed binary. That is the command the installer and the README both
+    # tell people to run when they skipped the hotkeys.
+    local share="$SHARE_DIR"
+    if [ "${DRY_RUN:-0}" = "1" ]; then
+        info "would install $REPO_ROOT/share/hammerspoon.lua -> $share/hammerspoon.lua"
+    elif mkdir -p "$share" 2>/dev/null; then
+        if install -m 0644 "$REPO_ROOT/share/hammerspoon.lua" "$share/hammerspoon.lua" 2>/dev/null; then
+            state_set SHARE_OWNED 1
+            state_set SHARE_PATH "$share/hammerspoon.lua"
+            ok "$share/hammerspoon.lua"
+        else
+            warn "could not write $share/hammerspoon.lua"
+            warn "'voxtype install-hammerspoon' will not work until the module is there"
+        fi
+    else
+        warn "could not create $share"
+    fi
+
     ensure_path_has_bin_dir
 }
 

@@ -303,21 +303,63 @@ if [ -f "$hs" ]; then
     else
         ok "no explicit require calls"
     fi
-    for pair in "V:hotkey" "delete:cancel" "R:restart"; do
+    for pair in "v:hotkey" "delete:cancel" "r:restart"; do
         key="${pair%%:*}"; sub="${pair##*:}"
-        if grep -q "\"$key\", function() fire(\"$sub\")" "$hs"; then
+        if grep -q "key = \"$key\".*arg = \"$sub\"" "$hs"; then
             ok "binds $key -> $sub"
         else
             bad "binds $key -> $sub" "not found in share/hammerspoon.lua"
         fi
     done
+
+    # The marker is what the installer waits for and doctor reports on, so it
+    # must not be written when a bind failed.
+    if grep -q 'pcall(hs.hotkey.bind' "$hs"; then
+        ok "a failing bind cannot abort the config"
+    else
+        bad "a failing bind cannot abort the config" "hs.hotkey.bind is not wrapped in pcall"
+    fi
+    if grep -q 'hk:enable()' "$hs"; then
+        ok "bound hotkeys are enabled explicitly"
+    else
+        bad "bound hotkeys are enabled explicitly" "no hk:enable() call"
+    fi
+    if grep -q 'bound == #BINDS' "$hs"; then
+        ok "the load marker is gated on every hotkey binding"
+    else
+        bad "the load marker is gated on every hotkey binding" "marker is written unconditionally"
+    fi
+    if grep -q 'hotkeys PARTIAL' "$hs"; then
+        ok "a partial load is reported as partial"
+    else
+        bad "a partial load is reported as partial" "no PARTIAL marker"
+    fi
+    if grep -q 'log.e(' "$hs"; then
+        ok "bind failures are logged with hs.logger"
+    else
+        bad "bind failures are logged with hs.logger" "silent failure"
+    fi
 else
     bad "share/hammerspoon.lua exists" "missing"
 fi
 
 echo
+echo "doctor understands the hotkey marker"
+drv="$ROOT/bin/voxtype"
+if grep -q 'hotkeys PARTIAL' "$drv"; then
+    ok "doctor reports a partial bind instead of an all-clear"
+else
+    bad "doctor reports a partial bind instead of an all-clear" "no PARTIAL handling"
+fi
+if grep -q "sed -E 's/.\*hotkeys loaded (\[0-9T:-\]+).\*/" "$drv"; then
+    ok "doctor still parses the timestamp from a full-load marker"
+else
+    bad "doctor still parses the timestamp from a full-load marker" "parse lost"
+fi
+
+echo
 echo "installer"
-for f in install.sh scripts/lib/common.sh scripts/setup-ollama.sh scripts/setup-app.sh; do
+for f in install.sh scripts/lib/common.sh scripts/preflight.sh scripts/setup-ollama.sh scripts/setup-app.sh tests/test-install.sh; do
     if bash -n "$ROOT/$f" 2>/dev/null; then ok "syntax: $f"; else bad "syntax: $f" "bash -n failed"; fi
 done
 if [ -f "$ROOT/install.sh" ] && grep -q -- "--uninstall" "$ROOT/install.sh"; then

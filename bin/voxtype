@@ -34,6 +34,28 @@ HS_DIR="$HOME/.hammerspoon"
 HS_CONFIG="$HS_DIR/init.lua"
 HS_MODULE="$HS_DIR/voxtype.lua"
 
+# Where the installer keeps hammerspoon.lua, so that 'voxtype
+# install-hammerspoon' works on a machine that only has the installed binary.
+#
+# Derived from this script's own location rather than $HOME, because the two do
+# not always agree: the installer honours VOXTYPE_BIN_DIR, and a Homebrew install
+# lands in a Cellar symlink. Candidates are tried in order, first match wins.
+self_dir() { (cd "$(dirname "$0")" 2>/dev/null && pwd) 2>/dev/null; }
+_voxtype_dir="$(self_dir)"
+SHARE_DIR=""
+for _cand in "${VOXTYPE_SHARE_DIR:-}" \
+             "${_voxtype_dir:+${_voxtype_dir%/}/../share/voxtype}" \
+             "$HOME/.local/share/voxtype"; do
+    [ -n "$_cand" ] || continue
+    if [ -z "$SHARE_DIR" ]; then
+        SHARE_DIR="$_cand"
+    fi
+    if [ -f "$_cand/hammerspoon.lua" ]; then
+        SHARE_DIR="$_cand"
+        break
+    fi
+done
+
 mkdir -p "$STATE_DIR" 2>/dev/null
 
 die() { echo "voxtype: $*" >&2; exit 1; }
@@ -421,11 +443,20 @@ cmd_doctor() {
 
     if [ -f "$HS_MODULE" ]; then
         if grep -q "voxtype" "$HS_CONFIG" 2>/dev/null; then
-            local loaded
-            loaded=$(grep -a 'hotkeys loaded' "$LOGFILE" 2>/dev/null | tail -1 \
-                     | sed -E 's/.*hotkeys loaded ([0-9T:-]+).*/\1/')
-            if [ -n "$loaded" ]; then
-                check "voxtype hotkeys loaded" ok "at $loaded"
+            # The module reports how many hotkeys it actually bound. A partial
+            # load used to look identical to a full one, so a dead hotkey still
+            # produced a confident all-clear.
+            local last
+            last=$(grep -a 'hotkeys loaded\|hotkeys PARTIAL' "$LOGFILE" 2>/dev/null | tail -1)
+            if printf '%s' "$last" | grep -q 'hotkeys PARTIAL'; then
+                local n
+                n=$(printf '%s' "$last" | sed -E 's/.*PARTIAL [^ ]+ \(([0-9]+)\/([0-9]+)\).*/\1 of \2/')
+                check "voxtype hotkeys loaded" no "only $n hotkeys bound - see hs.logger output"
+                failures=$((failures + 1))
+            elif [ -n "$last" ]; then
+                local when
+                when=$(printf '%s' "$last" | sed -E 's/.*hotkeys loaded ([0-9T:-]+).*/\1/')
+                check "voxtype hotkeys loaded" ok "at $when"
             else
                 check "voxtype hotkeys loaded" no "no load marker in $LOGFILE - open -a Hammerspoon"
                 failures=$((failures + 1))
@@ -487,8 +518,14 @@ EOF
 }
 
 cmd_install_hammerspoon() {
-    local src="$VOXTYPE_SHARE_DIR/hammerspoon.lua"
-    [ -f "$src" ] || die "cannot find hammerspoon.lua (set VOXTYPE_SHARE_DIR)"
+    # The installer drops the module next to the binary so this command keeps
+    # working on its own. It used to look only at VOXTYPE_SHARE_DIR, which only
+    # the installer ever set, so following the installer's own advice
+    # ("voxtype install-hammerspoon") died with an unbound variable.
+    local src="${VOXTYPE_SHARE_DIR:-$SHARE_DIR}/hammerspoon.lua"
+    if [ ! -f "$src" ]; then
+        die "cannot find hammerspoon.lua (looked in $src). Re-run the installer to put it back: curl -fsSL https://raw.githubusercontent.com/ompurwar/smart-transcriber/main/install.sh | bash"
+    fi
 
     mkdir -p "$HS_DIR"
 

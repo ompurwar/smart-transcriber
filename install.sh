@@ -16,6 +16,9 @@ REPO_URL="${VOXTYPE_REPO_URL:-https://github.com/ompurwar/smart-transcriber}"
 REPO_REF="${VOXTYPE_REF:-main}"
 
 BIN_DIR="${VOXTYPE_BIN_DIR:-$HOME/.local/bin}"
+# Where the Hammerspoon module is kept on disk, so that 'voxtype
+# install-hammerspoon' works with only the installed binary present.
+SHARE_DIR="${VOXTYPE_SHARE_DIR:-${BIN_DIR%/}/../share/voxtype}"
 REWRITE_MODEL="${VOXTYPE_OLLAMA_MODEL:-qwen2.5:3b}"
 WHISPER_MODEL="${VOXTYPE_WHISPER_MODEL:-small.en}"
 
@@ -245,6 +248,18 @@ do_uninstall() {
         rm -f "$BIN_DIR/voxtype"
         ok "removed $BIN_DIR/voxtype"
     fi
+
+    # The copy of the module that lives beside the binary. Only ours if we put
+    # it there.
+    if [ "$(state_get SHARE_OWNED 2>/dev/null)" = "1" ]; then
+        local share_path; share_path=$(state_get SHARE_PATH 2>/dev/null)
+        if [ -n "$share_path" ] && [ -f "$share_path" ]; then
+            rm -f "$share_path"
+            ok "removed $share_path"
+        fi
+        rmdir "$SHARE_DIR" 2>/dev/null && ok "removed the empty $SHARE_DIR"
+    fi
+
     rm -f "$(state_file)" "$(state_file).tmp.$$" 2>/dev/null
 
     cat <<EOF
