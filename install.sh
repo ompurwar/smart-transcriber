@@ -58,6 +58,9 @@ only removes its own changes on --uninstall.
 EOF
 }
 
+# FORCE and ASSUME_YES are read by the sourced preflight and common scripts,
+# which shellcheck cannot see across the file boundary.
+# shellcheck disable=SC2034
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-models)      DO_MODELS=0 ;;
@@ -78,22 +81,27 @@ done
 # Resolve the repo. Piped through stdin there is no script file to read from, so
 # fetch the tree first. git is nice to have but not required, and Homebrew is
 # not installed yet at this point, so fall back to a tarball.
+#
+# This runs before scripts/lib/common.sh exists, so it must not use have/info/ok
+# or anything else from the library. Using them here silently took the tarball
+# path on every piped install, because `have git` could not be found.
 fetch_repo() {
     local dest="$1"
+    say() { printf '    %s\n' "$1" >&2; }
     mkdir -p "$dest" 2>/dev/null
 
-    if have git; then
-        info "downloading the installer via git…"
+    if command -v git >/dev/null 2>&1; then
+        say "downloading the installer via git…"
         if git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$dest" >/dev/null 2>&1; then
             return 0
         fi
-        info "git clone did not work, trying a tarball…"
+        say "git clone did not work, trying a tarball…"
         rm -rf "$dest"
         mkdir -p "$dest"
     fi
 
     local tarball="$dest.tar.gz"
-    info "downloading a tarball from ${REPO_URL}/archive…"
+    say "downloading a tarball from ${REPO_URL}/archive…"
     if ! curl -fsSL --max-time 120 -o "$tarball" \
         "https://codeload.github.com/${REPO_URL#https://github.com/}/tar.gz/$REPO_REF"; then
         rm -f "$tarball"

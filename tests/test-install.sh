@@ -406,6 +406,98 @@ if env HOME="$SBX2" VOXTYPE_INSTALL_STATE="$SBX2/state/install-state" /bin/bash 
 ' 2>/dev/null; then ok "preflight helpers behave"; else bad "preflight helpers behave" "failed"; fi
 
 echo
+echo "the piped install path"
+# This is the path every new user takes, and it is the one path the rest of this
+# suite never runs: the script arrives on stdin, so it has no file to resolve a
+# repo from and has to download the tree. It also runs before common.sh exists,
+# so anything here that reaches for the library is a bug that only shows up in
+# production. An earlier draft called have/info in this function, which made
+# every piped install silently take the tarball path and print two errors.
+#
+# The stubs keep this offline and deterministic. curl only intercepts the
+# codeload tarball URL and defers everything else to the real curl, so the
+# network preflight still does its actual job.
+make_stubs() { # make_stubs <home> <git: fail|work>
+    local h="$1" mode="$2"
+    mkdir -p "$h/stub" "$h/cwd" "$h/stage/smart-transcriber-1.0.0"
+    # bsdtar has no --transform, so stage the tree under its archive root instead.
+    cp -R "$ROOT/install.sh" "$ROOT/bin" "$ROOT/share" "$ROOT/scripts" \
+        "$h/stage/smart-transcriber-1.0.0/" 2>/dev/null
+    cat > "$h/stub/curl" <<STUB
+#!/bin/bash
+url=""; out=""; prev=""
+for a in "\$@"; do
+    case "\$prev" in -o) out="\$a" ;; esac
+    case "\$a" in http*) url="\$a" ;; esac
+    prev="\$a"
+done
+case "\$url" in
+    *codeload.github.com*)
+        [ -n "\$out" ] || exit 1
+        tar -czf "\$out" -C "$h/stage" smart-transcriber-1.0.0 || exit 1
+        exit 0 ;;
+    *) exec /usr/bin/curl "\$@" ;;
+esac
+STUB
+    if [ "$mode" = "work" ]; then
+        cat > "$h/stub/git" <<STUB
+#!/bin/bash
+# Stand-in for 'git clone --depth 1 --branch <ref> <url> <dest>'
+dest="\${@: -1}"
+mkdir -p "\$dest" || exit 1
+cp -R "$ROOT/install.sh" "$ROOT/bin" "$ROOT/share" "$ROOT/scripts" "\$dest/" || exit 1
+exit 0
+STUB
+    else
+        printf '#!/bin/bash\nexit 1\n' > "$h/stub/git"
+    fi
+    chmod +x "$h/stub/curl" "$h/stub/git"
+}
+
+piped_run() { # piped_run <home> [args...]
+    local h="$1"; shift
+    OUT=$(cd "$h/cwd" && env \
+        HOME="$h" PATH="$h/stub:$BASE_PATH" VOXTYPE_HEADLESS=1 \
+        VOXTYPE_BIN_DIR="$h/bin" VOXTYPE_INSTALL_STATE="$h/state/install-state" \
+        /bin/bash -s -- --no-deps --no-models "$@" < "$ROOT/install.sh" 2>&1)
+    RC=$?
+}
+
+H=$(fresh pipe_git); make_stubs "$H" work
+piped_run "$H"
+check_rc "piped install with git exits 0" 0 "$RC"
+contains "piped install uses git when it works" "via git" "$OUT"
+lacks    "piped git path is quiet about errors" "command not found"
+if [ -x "$H/bin/voxtype" ]; then ok "piped git install produced a working binary"; else bad "piped git install produced a working binary" "missing"; fi
+if [ -f "$H/.hammerspoon/voxtype.lua" ]; then ok "piped git install found share/hammerspoon.lua"; else bad "piped git install found share/hammerspoon.lua" "missing"; fi
+
+H=$(fresh pipe_tar); make_stubs "$H" fail
+piped_run "$H"
+check_rc "piped install falls back to a tarball" 0 "$RC"
+contains "the git failure is reported"   "did not work"       "$OUT"
+contains "the tarball path is taken"      "downloading a tarball" "$OUT"
+lacks    "piped tarball path is quiet about errors" "command not found"
+if [ -x "$H/bin/voxtype" ]; then ok "piped tarball install produced a working binary"; else bad "piped tarball install produced a working binary" "missing"; fi
+if [ -f "$H/.hammerspoon/voxtype.lua" ]; then ok "piped tarball install found share/hammerspoon.lua"; else bad "piped tarball install found share/hammerspoon.lua" "missing"; fi
+
+echo
+echo "a failed download is explained"
+H=$(fresh pipe_nodl); make_stubs "$H" fail
+printf '#!/bin/bash\nexit 1\n' > "$H/stub/curl"
+piped_run "$H"
+check_rc "an unreachable repo fails loudly" 1 "$RC"
+contains "the failure names the repo"  "ompurwar/smart-transcriber" "$OUT"
+contains "the failure suggests a ref"   "VOXTYPE_REF"              "$OUT"
+
+echo
+echo "a broken download is explained"
+H=$(fresh pipe_bad); make_stubs "$H" fail
+printf '#!/bin/bash\nexit 0\n' > "$H/stub/curl"
+piped_run "$H"
+check_rc "a corrupt tarball fails loudly" 1 "$RC"
+contains "a corrupt tarball is reported" "could not download" "$OUT"
+
+echo
 if [ "$fail" -eq 0 ]; then
     printf '\033[32m%d passed, 0 failed\033[0m\n' "$pass"
     exit 0
