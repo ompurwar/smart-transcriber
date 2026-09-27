@@ -63,7 +63,10 @@ filter_src="$TMP/filter.py"
 python3 - "$filter_src" <<'PY'
 import pathlib, re, sys
 src = pathlib.Path("bin/voxtype").read_text()
-m = re.search(r"out=\$\(printf '%s' \"\$resp\" \| VOXTYPE_RAW=\"\$raw\" python3 -c '\n(.*?)\n' ", src, re.S)
+# Match loosely: the invocation has grown extra environment variables and a line
+# continuation, and pinning the exact text made this test fail for a change that
+# did not touch the filter at all.
+m = re.search(r"out=\$\(printf '%s' \"\$resp\".*?python3 -c '\n(.*?)\n' 2>/dev/null\)", src, re.S)
 if not m:
     sys.exit("could not locate the rewrite filter inside bin/voxtype")
 pathlib.Path(sys.argv[1]).write_text(m.group(1))
@@ -356,6 +359,309 @@ if grep -q "sed -E 's/.\*hotkeys loaded (\[0-9T:-\]+).\*/" "$drv"; then
 else
     bad "doctor still parses the timestamp from a full-load marker" "parse lost"
 fi
+
+echo
+echo "overlay state file"
+# The Hammerspoon overlay learns what voxtype is doing from ui.state, and it
+# cannot work out the recording path for itself because it runs with a different
+# environment. So the stage and the wav path both have to be published here.
+STUB="$TMP/stub"
+mkdir -p "$STUB"
+cat > "$STUB/rec" <<'STUB'
+#!/bin/bash
+# Stand-in for sox rec: write the target file, then stay alive until signalled.
+out=""
+for a in "$@"; do out="$a"; done
+[ -n "$out" ] && printf 'RIFF....WAVEfmt ' > "$out"
+sleep 30
+STUB
+chmod +x "$STUB/rec"
+
+UI="$VOXTYPE_STATE_DIR/ui.state"
+rm -f "$UI"
+PATH="$STUB:$PATH" bash "$VOXTYPE" start >/dev/null 2>&1
+check "start publishes the recording stage" "recording" "$(cut -f1 < "$UI" 2>/dev/null)"
+check "the state file is tab separated"     "3"         "$(awk -F'\t' '{print NF}' "$UI" 2>/dev/null)"
+contains "start publishes the wav path"     "rec.wav"   "$(cut -f3 < "$UI" 2>/dev/null)"
+if [ -n "$(cut -f2 < "$UI" 2>/dev/null)" ] && [ "$(cut -f2 < "$UI" 2>/dev/null)" -gt 0 ] 2>/dev/null; then
+    ok "start publishes a unix timestamp"
+else
+    bad "start publishes a unix timestamp" "got [$(cut -f2 < "$UI" 2>/dev/null)]"
+fi
+PATH="$STUB:$PATH" bash "$VOXTYPE" cancel >/dev/null 2>&1
+check "cancel publishes the cancelled stage" "cancelled" "$(cut -f1 < "$UI" 2>/dev/null)"
+PATH="$STUB:$PATH" bash "$VOXTYPE" cancel >/dev/null 2>&1
+
+# The two halves are only useful together, so check the module actually reads
+# the file the binary writes.
+if grep -q 'ui\.state' "$ROOT/share/hammerspoon.lua"; then
+    ok "the Hammerspoon module reads ui.state"
+else
+    bad "the Hammerspoon module reads ui.state" "no reference in the module"
+fi
+if grep -q 'UI_STATE=.*\$STATE_DIR/ui\.state' "$VOXTYPE"; then
+    ok "ui.state lives next to the rest of the state"
+else
+    bad "ui.state lives next to the rest of the state" "not derived from STATE_DIR"
+fi
+
+echo
+echo "overlay tuning"
+# 'voxtype overlay set' exists so the pill can be resized without editing
+# hammerspoon.lua and reinstalling, which matters because the module reads its
+# geometry once at load and Hammerspoon cannot see a new environment variable
+# until the next login.
+OVL="$VOXTYPE_STATE_DIR/overlay.conf"
+rm -f "$OVL"
+for k in VOXTYPE_PILL_W VOXTYPE_PILL_H VOXTYPE_PILL_R VOXTYPE_WAVE_H VOXTYPE_BARS VOXTYPE_TEXT_DY; do
+    if grep -q "$k" "$VOXTYPE"; then
+        ok "voxtype knows $k"
+    else
+        bad "voxtype knows $k" "not listed"
+    fi
+    if grep -q "$k" "$ROOT/share/hammerspoon.lua"; then
+        ok "the module honours $k"
+    else
+        bad "the module honours $k" "not read by the module"
+    fi
+done
+rm -f "$OVL"
+bash "$VOXTYPE" overlay set PILL_H=52 WAVE_H=46 >/dev/null 2>&1
+check "overlay set writes the pill height"    "VOXTYPE_PILL_H=52" "$(grep '^VOXTYPE_PILL_H=' "$OVL" 2>/dev/null)"
+check "overlay set accepts a short key name"   "VOXTYPE_WAVE_H=46" "$(grep '^VOXTYPE_WAVE_H=' "$OVL" 2>/dev/null)"
+bash "$VOXTYPE" overlay set pill_h=44 >/dev/null 2>&1
+check "overlay set updates a key in place"    "1" "$(grep -c '^VOXTYPE_PILL_H=44$' "$OVL" 2>/dev/null)"
+check "overlay set leaves the other key alone" "1" "$(grep -c '^VOXTYPE_WAVE_H=46$' "$OVL" 2>/dev/null)"
+before=$(cat "$OVL" 2>/dev/null)
+bash "$VOXTYPE" overlay set NOPE=1 >/dev/null 2>&1
+check "overlay set rejects an unknown key"    "$before" "$(cat "$OVL" 2>/dev/null)"
+bash "$VOXTYPE" overlay set PILL_H=abc >/dev/null 2>&1
+check "overlay set rejects a non-number"      "$before" "$(cat "$OVL" 2>/dev/null)"
+# '12abc' starts with a digit, so a check on the first character alone would
+# have let it through.
+bash "$VOXTYPE" overlay set PILL_H=12abc >/dev/null 2>&1
+check "overlay set rejects trailing junk"     "$before" "$(cat "$OVL" 2>/dev/null)"
+bash "$VOXTYPE" overlay set PILL_H= >/dev/null 2>&1
+check "overlay set rejects an empty value"    "$before" "$(cat "$OVL" 2>/dev/null)"
+bash "$VOXTYPE" overlay set PILL_H=-5 >/dev/null 2>&1
+check "overlay set rejects a negative size"   "$before" "$(cat "$OVL" 2>/dev/null)"
+bash "$VOXTYPE" overlay set TEXT_DY=-4 >/dev/null 2>&1
+check "overlay set accepts a negative nudge"  "VOXTYPE_TEXT_DY=-4" "$(grep '^VOXTYPE_TEXT_DY=' "$OVL" 2>/dev/null)"
+bash "$VOXTYPE" overlay set TEXT_DY=0 >/dev/null 2>&1
+check "overlay set accepts a zero nudge"      "VOXTYPE_TEXT_DY=0" "$(grep '^VOXTYPE_TEXT_DY=' "$OVL" 2>/dev/null)"
+bash "$VOXTYPE" overlay set >/dev/null 2>&1
+check "overlay set with no arguments fails"   "1" "$?"
+bash "$VOXTYPE" overlay reset >/dev/null 2>&1
+if [ -f "$OVL" ]; then bad "overlay reset removes the conf" "still there"; else ok "overlay reset removes the conf"; fi
+if grep -q 'overlay' "$ROOT/README.md"; then
+    ok "the overlay is documented"
+else
+    bad "the overlay is documented" "not mentioned in the README"
+fi
+
+# Four bugs that all looked like styling complaints and were not. They are
+# checked by looking for the thing that fixes each, because the Lua runs inside
+# Hammerspoon and there is no way to exercise it from here.
+if grep -q 'expired' "$ROOT/share/hammerspoon.lua"; then
+    ok "the short-lived stages cannot pop back"
+else
+    bad "the short-lived stages cannot pop back" "no expired flag in the poller"
+fi
+if grep -q 'scaled(levels)' "$ROOT/share/hammerspoon.lua"; then
+    ok "the auto-gain is actually applied to the bars"
+else
+    bad "the auto-gain is actually applied to the bars" "auto_gain runs but its result is unused"
+fi
+if grep -q 'BAR_MS' "$ROOT/share/hammerspoon.lua"; then
+    ok "each bar covers a slice of time, not a fixed sample count"
+else
+    bad "each bar covers a slice of time, not a fixed sample count" "BAR_MS missing"
+fi
+if grep -q 'rate = (rate and rate > 0) and rate or 48000' "$ROOT/share/hammerspoon.lua"; then
+    ok "the sample rate is read from the wav header"
+else
+    bad "the sample rate is read from the wav header" "no rate in parse_header"
+fi
+
+echo
+echo "language models"
+# Both defaults have to move together with the language. small.en cannot
+# transcribe a non-English language at all, and qwen2.5:1.5b was measured
+# translating Hindi into English instead of cleaning it, so pairing either of
+# them with a non-English language is a silent failure.
+cfg() { bash "$VOXTYPE" config; }
+contains "en picks the English-only whisper"  "whisper     : small.en"     "$(VOXTYPE_LANGUAGE=en cfg)"
+contains "en picks the small fast rewriter"   "ollama model: qwen2.5:1.5b" "$(VOXTYPE_LANGUAGE=en cfg)"
+contains "hi picks the multilingual whisper"  "whisper     : small"        "$(VOXTYPE_LANGUAGE=hi cfg)"
+contains "hi picks the bigger rewriter"       "ollama model: qwen2.5:7b"   "$(VOXTYPE_LANGUAGE=hi cfg)"
+contains "en-US is still English"             "whisper     : small.en"     "$(VOXTYPE_LANGUAGE=en-US cfg)"
+# An empty value means auto-detect, which must not be turned into English: the
+# English-only pair cannot transcribe what auto-detect might find.
+contains "empty language means auto-detect"   "language    : auto"         "$(VOXTYPE_LANGUAGE='' cfg)"
+contains "auto-detect uses multilingual"      "whisper     : small"        "$(VOXTYPE_LANGUAGE='' cfg)"
+contains "an explicit whisper still wins"     "whisper     : medium"       "$(VOXTYPE_LANGUAGE=hi VOXTYPE_WHISPER_MODEL=medium cfg)"
+contains "an explicit rewriter still wins"    "ollama model: llama3.1:8b"  "$(VOXTYPE_LANGUAGE=hi VOXTYPE_OLLAMA_MODEL=llama3.1:8b cfg)"
+
+echo
+echo "script choice"
+contains "hindi defaults to roman output"     "roman"    "$(VOXTYPE_LANGUAGE=hi cfg)"
+contains "english stays native"               "native"   "$(VOXTYPE_LANGUAGE=en cfg)"
+contains "script can be forced native"        "native"   "$(VOXTYPE_LANGUAGE=hi VOXTYPE_SCRIPT=native cfg)"
+contains "script can be forced roman"         "roman"    "$(VOXTYPE_LANGUAGE=en VOXTYPE_SCRIPT=roman cfg)"
+
+echo
+echo "script guard"
+# The guard is the part that is easy to get wrong and impossible to notice: a
+# small model quietly translating Hindi into English still produces valid-looking
+# Latin text. Rather than reason about the prompt, stand up a canned Ollama whose
+# reply is read from a file, so each case can choose what the "model" says.
+GUARD_PORT=$(( 20000 + RANDOM % 20000 ))
+GUARD_REPLY="$TMP/guard-reply.json"
+printf '%s' "{}" > "$GUARD_REPLY"
+cat > "$TMP/guard_server.py" <<'PY'
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+port, reply_file = int(sys.argv[1]), sys.argv[2]
+
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(n)
+        # Keep the request so a test can see what the rewriter was actually
+        # asked to clean, which is where the transliteration shows up.
+        with open(reply_file + ".req", "wb") as f:
+            f.write(body)
+        with open(reply_file) as f:
+            reply = json.load(f).get("response", "")
+        out = json.dumps({"response": reply}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+    def log_message(self, *a):
+        pass
+
+HTTPServer(("127.0.0.1", port), H).serve_forever()
+PY
+python3 "$TMP/guard_server.py" "$GUARD_PORT" "$GUARD_REPLY" >/dev/null 2>&1 &
+GUARD_PID=$!
+for _ in $(seq 1 50); do
+    python3 -c "import socket,sys; s=socket.socket(); sys.exit(0 if s.connect_ex(('127.0.0.1',$GUARD_PORT))==0 else 1)" && break
+    sleep 0.1
+done
+
+hindi_in='नमस्ते यह एक परीक्षण है um मैं कल बारह बजे मिलूँगा like ठीक है'
+try_guard() { # try_guard <model reply>
+    printf '{"response": %s}' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1")" > "$GUARD_REPLY"
+    printf '%s' "$hindi_in" | VOXTYPE_LANGUAGE=hi VOXTYPE_OLLAMA_MODEL=qwen3:4b \
+        VOXTYPE_OLLAMA_URL="http://127.0.0.1:$GUARD_PORT/api/generate" \
+        VOXTYPE_STATE_DIR="$VOXTYPE_STATE_DIR" bash "$VOXTYPE" rewrite 2>/dev/null
+}
+
+# The model translated instead of transliterating. Latin script, so a check for
+# Devanagari alone would wave it through; it must be caught and fall back.
+check "english back from hindi input is rejected" "$hindi_in" \
+    "$(try_guard 'Hello, this is a test. I will meet you at 7 tonight.')"
+# Devanagari back when Roman was asked for: also rejected.
+check "devanagari back from a roman request is rejected" "$hindi_in" \
+    "$(try_guard 'नमस्ते यह एक परीक्षण है मैं कल मिलूँगा')"
+# A real Hinglish rewrite must survive the guard, or the guard would be worse
+# than the bug it is fixing.
+check "a real hinglish rewrite is kept" "Theek hai, kal milte hain." \
+    "$(try_guard 'Theek hai, kal milte hain.')"
+
+echo
+echo "transliteration"
+# Whisper returns Devanagari and no model will convert it reliably, so the
+# conversion has to happen before the rewriter is called. Check what the rewriter
+# was actually sent: it must already be Latin, with no Devanagari left in it.
+rm -f "$GUARD_REPLY.req"
+try_guard 'Theek hai.' >/dev/null
+sent=$(python3 -c "
+import json, sys
+try:
+    body = json.load(open('$GUARD_REPLY.req'))
+except Exception:
+    sys.exit(0)
+print(body.get('prompt', ''))
+")
+case "$sent" in
+    *"नमस्ते"*) bad "devanagari is transliterated before the rewriter runs" "still Devanagari" ;;
+    *namaste*)  ok  "devanagari is transliterated before the rewriter runs" ;;
+    *)          bad "devanagari is transliterated before the rewriter runs" "no romanised text in the request" ;;
+esac
+if [ -n "$sent" ] && python3 -c "
+import sys
+sys.exit(0 if any('\u0900' <= c <= '\u097f' for c in sys.argv[1]) else 1)
+" "$sent"; then
+    bad "the rewriter is never shown Devanagari" "Devanagari found in the request"
+else
+    ok "the rewriter is never shown Devanagari"
+fi
+
+kill $GUARD_PID 2>/dev/null
+wait 2>/dev/null
+
+echo
+echo "hotkey lock"
+# Hammerspoon fires the hotkey without waiting, so two quick presses overlap and
+# both can decide to stop-and-paste, which pastes the text twice.
+LOCK="$VOXTYPE_STATE_DIR/hotkey.lock"
+rm -rf "$LOCK"
+sleep 30 & HOLDER=$!
+mkdir -p "$LOCK" && printf '%s\n' "$HOLDER" > "$LOCK/pid"
+out=$(VOXTYPE_STATE_DIR="$VOXTYPE_STATE_DIR" bash "$VOXTYPE" cancel 2>&1)
+check "a held lock makes a second press a no-op" "" "$out"
+kill "$HOLDER" 2>/dev/null
+rm -rf "$LOCK"
+mkdir -p "$LOCK"
+printf '999999\n' > "$LOCK/pid"
+# a lock whose owner is dead must not wedge dictation
+VOXTYPE_STATE_DIR="$VOXTYPE_STATE_DIR" bash "$VOXTYPE" cancel >/dev/null 2>&1
+if [ -d "$LOCK" ]; then
+    bad "a dead lock holder is broken" "lock still present"
+else
+    ok "a dead lock holder is broken"
+fi
+
+echo
+echo "overlay rounding"
+# roundedRadius is not an attribute in this build of Hammerspoon and is dropped
+# silently, which is why the corners stayed square through two rounds of
+# "fixing" the radius value. Only roundedRectRadii draws them.
+if grep -q 'roundedRectRadii' "$ROOT/share/hammerspoon.lua"; then
+    ok "the overlay rounds corners with roundedRectRadii"
+else
+    bad "the overlay rounds corners with roundedRectRadii" "attribute missing"
+fi
+if grep -q 'roundedRadius' "$ROOT/share/hammerspoon.lua"; then
+    bad "the silently-ignored roundedRadius is gone" "roundedRadius still present"
+else
+    ok "the silently-ignored roundedRadius is gone"
+fi
+
+# The newest bar has to be on the right so the waveform scrolls left like every
+# other one the user has seen. The comment always said "drawn at the right" while
+# the code put it at WAV_X, i.e. on the left, so it scrolled backwards.
+if grep -q 'WAV_X + (BARS - 1 - i)' "$ROOT/share/hammerspoon.lua"; then
+    ok "the waveform scrolls left, newest bar on the right"
+else
+    bad "the waveform scrolls left, newest bar on the right" "newest bar is not placed at the right edge"
+fi
+
+echo
+echo "incomplete model"
+# An interrupted download leaves the model directory behind with only part of
+# the CoreML bundles, and every transcription then fails to load it. A directory
+# test is not enough to call that model present.
+HALF="$TMP/half-model"
+mkdir -p "$HALF/MelSpectrogram.mlmodelc"
+: > "$HALF/MelSpectrogram.mlmodelc/coremldata.bin"
+out=$(VOXTYPE_MODEL_DIR="$HALF" VOXTYPE_STATE_DIR="$VOXTYPE_STATE_DIR" \
+      bash "$VOXTYPE" doctor 2>&1)
+contains "a half-downloaded model is not called ready" "incomplete" "$out"
 
 echo
 echo "installer"

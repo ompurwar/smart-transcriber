@@ -20,19 +20,79 @@ VOXTYPE_VERSION="0.1.0"
 STATE_DIR="${VOXTYPE_STATE_DIR:-$HOME/.cache/voxtype}"
 WAV="$STATE_DIR/rec.wav"
 PIDFILE="$STATE_DIR/rec.pid"
+# Machine-readable progress for the Hammerspoon overlay. Hammerspoon runs with
+# its own environment and cannot see VOXTYPE_STATE_DIR, so the recording path is
+# published here rather than derived on the other side.
+UI_STATE="$STATE_DIR/ui.state"
 LOGFILE="$STATE_DIR/hs.log"
 
 # WhisperKit's on-disk layout is always <root>/models/argmaxinc/whisperkit-coreml/
 # openai_whisper-<variant>, so discover it instead of pinning a path that shifts
 # between CLI releases.
-WHISPER_VARIANT="${VOXTYPE_WHISPER_MODEL:-small.en}"
 WHISPER_CACHE="${VOXTYPE_WHISPER_CACHE:-$HOME/.cache/whisperkit}"
 
 OLLAMA_URL="${VOXTYPE_OLLAMA_URL:-http://localhost:11434/api/generate}"
-OLLAMA_MODEL="${VOXTYPE_OLLAMA_MODEL:-qwen2.5:1.5b}"
 OLLAMA_TIMEOUT="${VOXTYPE_OLLAMA_TIMEOUT:-90}"
-LANGUAGE="${VOXTYPE_LANGUAGE:-en}"
+# No colon on the expansion: the README documents an empty value as "auto
+# detect", and ${VAR:-en} would turn that empty value into English, which also
+# picks the English-only model and so defeats the point of auto.
+LANGUAGE="${VOXTYPE_LANGUAGE-en}"
 PASTE="${VOXTYPE_NO_PASTE:-0}"
+
+# The model defaults follow the language, and an explicit setting always wins.
+#
+# The English-only pair is the fast, accurate one for English, but it cannot do
+# anything else: small.en has no other language in it at all, and the 1.5B
+# rewriter was measured translating Hindi into English instead of cleaning it
+# ("नमस्ते ... मैं कल बारह बजे मिलूँगा" came back as "Hello, ... I'll be there at
+# 7:00 PM"). So neither of those is a safe default once the language is not
+# English, and the multilingual pair takes over.
+is_english() {
+    case "$LANGUAGE" in
+        en|en-*|en_*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ -n "${VOXTYPE_WHISPER_MODEL:-}" ]; then
+    WHISPER_VARIANT="$VOXTYPE_WHISPER_MODEL"
+elif is_english; then
+    WHISPER_VARIANT="small.en"
+else
+    WHISPER_VARIANT="small"
+fi
+
+# qwen2.5:7b rather than qwen3:4b for the non-English rewriter, which is not the
+# obvious pick. qwen3:4b is smaller, newer and also Apache-2.0, but its Ollama
+# template appends "<|im_start|>assistant\n<think>" to every prompt, so it
+# reasons before answering no matter what the think flag says - over a thousand
+# tokens of "Okay, let's tackle this" on a one-line transcript, which is far too
+# slow to sit in front of a paste, and the reasoning then trips the filter that
+# discards answers. qwen2.5:7b has no such mode and cleans Hinglish well.
+if [ -n "${VOXTYPE_OLLAMA_MODEL:-}" ]; then
+    OLLAMA_MODEL="$VOXTYPE_OLLAMA_MODEL"
+elif is_english; then
+    OLLAMA_MODEL="qwen2.5:1.5b"
+else
+    OLLAMA_MODEL="qwen2.5:7b"
+fi
+
+# Script the transcript should come out in. Whisper and the rewriter both
+# default to Devanagari for Hindi, but Hindi dictation is nearly always pasted
+# somewhere that expects Hinglish, so Roman is the default for the languages
+# where typing in Roman is the norm. VOXTYPE_SCRIPT forces either way.
+SCRIPT="${VOXTYPE_SCRIPT:-auto}"
+WANT_ROMAN=0
+case "$SCRIPT" in
+    roman)  WANT_ROMAN=1 ;;
+    native) WANT_ROMAN=0 ;;
+    *)
+        case "$LANGUAGE" in
+            hi|hi-*|hi_*|mr|mr-*|ne|ne-*|ur|ur-*|pa|pa-*|gu|gu-*|bn|bn-*|or|as|sa)
+                WANT_ROMAN=1 ;;
+        esac
+        ;;
+esac
 
 HS_DIR="$HOME/.hammerspoon"
 HS_CONFIG="$HS_DIR/init.lua"
@@ -66,18 +126,56 @@ die() { echo "voxtype: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 find_model_dir() {
-    local d
-    d=$(ls -d "$WHISPER_CACHE"/models/argmaxinc/whisperkit-coreml/\
-openai_whisper-"$WHISPER_VARIANT" 2>/dev/null | head -1)
+    # whisperkit-cli does not always use the same cache. On this machine the
+    # model had landed in ~/Documents/huggingface/models, and because the only
+    # place checked here was $WHISPER_CACHE, 'voxtype doctor' called a working
+    # model missing and 'voxtype warmup' downloaded a second 479 MB copy of it.
+    # Check where it actually is before claiming anything about it.
+    local base="$1" d
+    d=$(find "$base/models/argmaxinc/whisperkit-coreml" -maxdepth 1 \
+        -name "openai_whisper-$WHISPER_VARIANT" -type d 2>/dev/null | head -1)
     [ -n "$d" ] && [ -d "$d" ] || return 1
     printf '%s' "$d"
+}
+
+# Where whisperkit-cli keeps its weights, in the order worth trying. HF_HOME
+# wins because that is the variable it actually honours, then the cache we ask
+# for, then the two places it falls back to on its own.
+whisper_cache_candidates() {
+    printf '%s\n' \
+        "${HF_HOME:-$HOME/Documents/huggingface}" \
+        "$WHISPER_CACHE" \
+        "$HOME/.cache/whisperkit" \
+        "$HOME/Library/Caches/whisperkit-cli"
+}
+
+locate_model_dir() {
+    local base
+    while IFS= read -r base; do
+        [ -n "$base" ] || continue
+        if find_model_dir "$base"; then return 0; fi
+    done < <(whisper_cache_candidates)
+    return 1
 }
 
 model_dir() {
     # An explicit override always wins.
     if [ -n "${VOXTYPE_MODEL_DIR:-}" ]; then printf '%s' "$VOXTYPE_MODEL_DIR"; return 0; fi
-    find_model_dir 2>/dev/null && return 0
+    locate_model_dir 2>/dev/null && return 0
     return 1
+}
+
+# A directory is not a model. An interrupted download leaves the directory behind
+# with only part of the CoreML bundles in it, and the directory test above then
+# says the model is present while every transcription fails to load it. Check for
+# the two weight files a usable WhisperKit model must have.
+model_complete() {
+    local dir
+    dir=$(model_dir) || return 1
+    [ -f "$dir/MelSpectrogram.mlmodelc/coremldata.bin" ] || return 1
+    [ -f "$dir/AudioEncoder.mlmodelc/weights/weight.bin" ] || return 1
+    [ -f "$dir/TextDecoder.mlmodelc/weights/weight.bin" ] || return 1
+    return 0
 }
 
 # ---------------------------------------------------------------- state
@@ -90,8 +188,52 @@ is_recording() {
     kill -0 "$pid" 2>/dev/null
 }
 
+# Serialise the hotkey path.
+#
+# Hammerspoon fires the hotkey and does not wait for it, so two presses in quick
+# succession run two `voxtype hotkey` processes at the same time. Both then read
+# the same pidfile, both decide they are the one stopping, and both paste: the
+# document ends up with the same sentence twice, with no space between them.
+# That double paste is the bug this lock exists to stop.
+#
+# mkdir is the lock primitive because it fails atomically if the directory
+# already exists, which is true everywhere without needing flock (absent on a
+# stock macOS) or a fifo.
+LOCKDIR="$STATE_DIR/hotkey.lock"
+
+acquire_lock() {
+    if mkdir "$LOCKDIR" 2>/dev/null; then
+        printf '%s\n' "$$" > "$LOCKDIR/pid" 2>/dev/null
+        return 0
+    fi
+    # A lock whose owner is gone is not a lock, it is a wedged install: a
+    # killed process would otherwise block dictation until the next reboot.
+    local holder
+    holder=$(cat "$LOCKDIR/pid" 2>/dev/null)
+    if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+        return 1
+    fi
+    rm -rf "$LOCKDIR"
+    if mkdir "$LOCKDIR" 2>/dev/null; then
+        printf '%s\n' "$$" > "$LOCKDIR/pid" 2>/dev/null
+        return 0
+    fi
+    return 1
+}
+
+release_lock() { rm -rf "$LOCKDIR" 2>/dev/null; }
+
 beep() { osascript -e 'beep' >/dev/null 2>&1 || true; }
 hud() { osascript -e "display notification \"$1\" with title \"voxtype\"" >/dev/null 2>&1 || true; }
+
+# Publish the current stage for the Hammerspoon overlay. Written to a temp file
+# and renamed, because the overlay polls this file several times a second and
+# would otherwise be able to read it half-written.
+ui_state() {
+    printf '%s\t%s\t%s\n' "$1" "$(date +%s)" "${2:-}" \
+        > "$UI_STATE.tmp" 2>/dev/null && mv -f "$UI_STATE.tmp" "$UI_STATE" 2>/dev/null
+    return 0
+}
 
 # ---------------------------------------------------------------- commands
 
@@ -112,6 +254,7 @@ cmd_cancel() {
         kill -9 "$pid" 2>/dev/null
         rm -f "$PIDFILE" "$WAV"
         hud "cancelled"
+        ui_state cancelled ""
         echo "cancelled"
     else
         echo "idle"
@@ -142,6 +285,7 @@ cmd_start() {
 
     beep
     hud "recording…"
+    ui_state recording "$WAV"
     echo "recording"
 }
 
@@ -160,9 +304,10 @@ cmd_stop() {
     kill -9 "$pid" 2>/dev/null
     rm -f "$PIDFILE"
 
-    [ -s "$WAV" ] || die "recording was empty"
+    [ -s "$WAV" ] || { ui_state empty ""; die "recording was empty"; }
 
     hud "transcribing…"
+    ui_state transcribing "$WAV"
     local raw
     raw=$(transcribe "$WAV")
     raw=$(strip_tags "$raw")
@@ -170,15 +315,18 @@ cmd_stop() {
     if [ -z "${raw//[[:space:]]/}" ]; then
         rm -f "$WAV"
         hud "nothing heard"
+        ui_state empty ""
         echo ""
         return 0
     fi
 
     hud "cleaning up…"
+    ui_state polishing "$WAV"
     local clean
     clean=$(reformat "$raw")
 
     rm -f "$WAV"
+    ui_state "done" ""
     printf '%s' "$clean"
     printf '\n'
 }
@@ -197,11 +345,13 @@ paste_into_frontmost() {
     sleep 0.3
     if ! osascript -e 'tell application "System Events" to keystroke "v" using command down' >/dev/null 2>&1; then
         hud "paste blocked - text is on the clipboard"
+        ui_state blocked ""
     fi
 }
 
 # The hotkey path: one command for both halves of the toggle, so the caller does
-# not have to know the current state.
+# not have to know the current state. The lock is taken by the dispatcher, so
+# that restart can call cancel and start without trying to take it a second time.
 cmd_hotkey() {
     if is_recording; then
         local text
@@ -235,6 +385,10 @@ transcribe() {
         args=(--model "$WHISPER_VARIANT" --audio-path "$wav")
     fi
     [ -n "$LANGUAGE" ] && args+=(--language "$LANGUAGE")
+    # No --prompt here for the Roman case. A Roman-script prompt was tried to
+    # bias whisper away from Devanagari and it made no difference at all: the
+    # output stayed in Devanagari either way, so the transliteration happens
+    # further down instead.
     whisperkit-cli transcribe "${args[@]}" 2>/dev/null
 }
 
@@ -253,6 +407,106 @@ print(t)
 ' 2>/dev/null || printf '%s' "$1"
 }
 
+# Devanagari to Latin letters.
+#
+# This is done here rather than asked of the model because the model will not do
+# it: qwen3:4b reasons about the request instead of answering, qwen2.5:7b hands
+# the Devanagari straight back, and qwen2.5:1.5b translates the words into
+# English, all measured. Whisper will not do it either: a Roman-script --prompt
+# was tried and the output stayed in Devanagari. A lookup table has none of
+# those failure modes and cannot mistranslate.
+#
+# It is a transliteration, not a translation, and it is deliberately literal:
+# the rewriter runs afterwards and normalises the spelling ("naheen" to "nahi",
+# "achchha" to "accha") using the context of the whole sentence.
+romanize_text() {
+    python3 -c '
+import re, sys
+
+CONS = {
+    "क": "k", "ख": "kh", "ग": "g", "घ": "gh", "ङ": "ng",
+    "च": "ch", "छ": "chh", "ज": "j", "झ": "jh", "ञ": "ny",
+    "ट": "t", "ठ": "th", "ड": "d", "ढ": "dh", "ण": "n",
+    "त": "t", "थ": "th", "द": "d", "ध": "dh", "न": "n",
+    "प": "p", "फ": "ph", "ब": "b", "भ": "bh", "म": "m",
+    "य": "y", "र": "r", "ल": "l", "व": "v", "श": "sh",
+    "ष": "sh", "स": "s", "ह": "h",
+    "क़": "q", "ख़": "kh", "ग़": "gh", "ज़": "z", "ड़": "r",
+    "ढ़": "rh", "फ़": "f", "य़": "y",
+}
+VOWEL = {
+    "अ": "a", "आ": "aa", "इ": "i", "ई": "ee", "उ": "u", "ऊ": "oo",
+    "ऋ": "ri", "ए": "e", "ऐ": "ai", "ओ": "o", "औ": "au", "ऑ": "o",
+    "ऍ": "e",
+}
+MATRA = {
+    "ा": "aa", "ि": "i", "ी": "ee", "ु": "u", "ू": "oo", "ृ": "ri",
+    "े": "e", "ै": "ai", "ो": "o", "ौ": "au", "ॉ": "o", "ॅ": "e",
+}
+VIRAMA, ANUSVARA, CHANDRABINDU, VISARGA, NUKTA = "्", "ं", "ँ", "ः", "़"
+DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
+
+# A following nukta changes the consonant it sits on.
+NUKTED = {"k": "q", "kh": "kh", "g": "gh", "j": "z", "d": "r",
+          "dh": "rh", "ph": "f"}
+
+
+def word_to_roman(word):
+    out = []
+    i, n = 0, len(word)
+    while i < n:
+        ch = word[i]
+        if ch == NUKTA:
+            i += 1
+            continue
+        if ch in CONS:
+            base = CONS[ch]
+            i += 1
+            if i < n and word[i] == NUKTA:
+                base = NUKTED.get(base, base)
+                i += 1
+            if i < n and word[i] in MATRA:
+                out.append(base + MATRA[word[i]])
+                i += 1
+            elif i < n and word[i] == VIRAMA:
+                # virama suppresses the inherent vowel
+                out.append(base)
+                i += 1
+            else:
+                out.append(base + "a")
+        elif ch in VOWEL:
+            out.append(VOWEL[ch]); i += 1
+        elif ch in MATRA:
+            out.append(MATRA[ch]); i += 1
+        elif ch in (ANUSVARA, CHANDRABINDU):
+            out.append("n"); i += 1
+        elif ch == VISARGA:
+            out.append("h"); i += 1
+        elif ch == VIRAMA:
+            i += 1
+        else:
+            out.append(ch); i += 1
+    w = "".join(out)
+    # Hindi drops the inherent vowel at the end of a word, and Hinglish writes
+    # final long vowels short: राम is "raam" not "raama", रहा is "raha" not
+    # "rahaa". Words of two letters or fewer are left alone so आ stays "aa".
+    if len(w) > 2 and w.endswith("aa"):
+        w = w[:-1]
+    elif len(w) > 2 and w.endswith("a"):
+        w = w[:-1]
+    return w
+
+
+text = sys.stdin.read().translate(DIGITS)
+text = text.replace("॥", ".").replace("।", ".")
+# Match the whole Devanagari block rather than \w: the matras and the virama are
+# combining marks, which \w does not count as word characters, and a \w pattern
+# split every syllable apart.
+sys.stdout.write(re.sub(r"[\u0900-\u097F]+",
+                        lambda m: word_to_roman(m.group(0)), text))
+' 2>/dev/null
+}
+
 reformat() {
     local raw="$1"
 
@@ -261,23 +515,56 @@ reformat() {
         return 0
     fi
 
+    # What the rewriter is asked to clean. For a Roman-script language the
+    # transcript is transliterated first, so the model is only ever asked to
+    # tidy text that is already in the script the user wants. $raw stays the
+    # original for the guard below, which needs to know the input was Hindi.
+    local ask="$raw"
+    if [ "$WANT_ROMAN" = "1" ]; then
+        local converted
+        converted=$(printf '%s' "$raw" | romanize_text)
+        # If the transliteration produced nothing (python missing, say), fall
+        # back to what came in rather than feeding the model an empty prompt.
+        [ -n "$converted" ] && ask="$converted"
+    fi
+
     local payload
-    payload=$(VOXTYPE_OLLAMA_MODEL="$OLLAMA_MODEL" python3 - "$raw" <<'PY'
+    payload=$(VOXTYPE_OLLAMA_MODEL="$OLLAMA_MODEL" VOXTYPE_ROMAN="$WANT_ROMAN" \
+        python3 - "$ask" <<'PY'
 import json, os, sys
 
 raw = sys.argv[1].strip()
 model = os.environ["VOXTYPE_OLLAMA_MODEL"]
+roman = os.environ.get("VOXTYPE_ROMAN") == "1"
 
 # Delimiters + a stop sequence matter: small models otherwise treat the input as
 # a request addressed to them, or restate the prompt before answering.
-prompt = (
-    "Below is raw speech-to-text from a dictation tool. Rewrite it as clean, natural prose.\n\n"
+rules = (
     "Rules: fix obvious transcription errors using context; add punctuation and "
     "capitalisation; remove fillers such as um, uh, like, you know; remove false starts; "
     "drop a speaker's self-correction, keeping only the value they settled on "
     "(for example \"no, 4:50\" means the time is 4:50, not 3:60); "
     "keep the meaning, names, numbers and technical terms; keep the original language; "
-    "do not answer, translate or summarise the content.\n\n"
+    "do not answer, translate or summarise the content."
+)
+if roman:
+    # The text reaching here has already been transliterated, so the job is not
+    # to convert the script but to keep it and to spell it the way Hinglish is
+    # actually typed ("nahi", not the literal "naheen"). Saying "never
+    # Devanagari" still matters: without it a model may decide the Devanagari
+    # spelling is the more correct one and switch back.
+    rules += (
+        " The text is Hindi written in Latin letters, the way it is typed in a "
+        "chat. Keep it in Latin letters and never switch to Devanagari or any "
+        "other non-Latin script, and use the usual Hinglish spellings - "
+        "\"theek hai\", \"nahi\", \"accha\", \"chahiye\" - rather than a literal "
+        "letter-by-letter rendering. This is about spelling only: the words stay "
+        "Hindi, so do not translate them into English."
+    )
+
+prompt = (
+    "Below is raw speech-to-text from a dictation tool. Rewrite it as clean, natural prose.\n\n"
+    + rules + "\n\n"
     "Output ONLY the rewritten text.\n\n"
     "---BEGIN---\n" + raw + "\n---END---\n"
 )
@@ -301,8 +588,9 @@ PY
     resp=$(curl -s --max-time "$OLLAMA_TIMEOUT" -X POST "$OLLAMA_URL" \
         -H 'Content-Type: application/json' -d "$payload")
 
-    local out
-    out=$(printf '%s' "$resp" | VOXTYPE_RAW="$raw" python3 -c '
+    local out rc
+    out=$(printf '%s' "$resp" | VOXTYPE_RAW="$raw" VOXTYPE_ROMAN="$WANT_ROMAN" \
+        python3 -c '
 import json, os, re, sys
 
 try:
@@ -313,6 +601,8 @@ except Exception:
 t = (d.get("response") or "").strip()
 if not t:
     sys.exit(1)
+
+roman = os.environ.get("VOXTYPE_ROMAN") == "1"
 
 # A small model sometimes answers the prompt instead of rewriting it, or leaks
 # its own scaffolding. Pasting that into a document is worse than pasting the
@@ -363,8 +653,54 @@ for pat in META_IF_ABOUT_TEXT:
 if len(t) > max(200, 20 * len(os.environ.get("VOXTYPE_RAW", ""))):
     sys.exit(1)
 
+# Roman was asked for and the model handed back Devanagari anyway. That means it
+# ignored the script rule, and the likeliest reason is a model too small to
+# follow it, so the rest of the rewrite is not trustworthy either. Exit 3 says so
+# specifically: the caller falls back to the raw transcript, which is still the
+# wrong script but is at least the actual words rather than a rewrite that may
+# also have drifted. Distinct from the other failures, which mean the model or
+# ollama was unusable.
+#
+# Checking for Devanagari is not enough on its own. A small model asked for
+# Roman Hindi does not reach for Devanagari, it translates: an actual run of
+# qwen2.5:1.5b turned that Hindi greeting into "Hello, this is a test ...",
+# which is Latin script and so sailed straight through. The output has to be
+# checked for actually being Hindi, not merely for not being Devanagari.
+if roman:
+    raw = os.environ.get("VOXTYPE_RAW", "")
+    input_was_hindi = bool(re.search(r"[\u0900-\u097F]", raw))
+    if re.search(r"[\u0900-\u097F]", t):
+        sys.exit(3)
+    # Only an all-Latin output from a Devanagari input can be a silent
+    # translation; when the input was already Roman there is nothing to compare
+    # against and the model is trusted.
+    if input_was_hindi:
+        # Hindi function words that are not also English words, so their absence
+        # from a Latin-script result means the result is English. Deliberately
+        # excludes the ambiguous ones ("to", "main", "me", "par") because a false
+        # accept here is cheaper than throwing away a good rewrite.
+        HINDI = (
+            "hai hain hoga hogi nahi nahin kya kyun kyon hum aap tum yeh woh "
+            "kal aaj theek thik aur bhi toh abhi phir bahut accha acha sahi "
+            "karna karo karunga kiye kiya raha rahi rahe matlab samajh batao "
+            "chahiye milte mile baat haan nah wala wali yaar bhai dost liye "
+            "saath apna apni mera meri tera teri humara kuch sab koi log aage "
+            "peechhe chal chalo dekh dekho suno lena dena bolo kaisa kaise"
+        ).split()
+        if not any(re.search(r"\b" + w + r"\b", t, re.IGNORECASE) for w in HINDI):
+            sys.exit(4)
+
 print(t)
 ' 2>/dev/null)
+    rc=$?
+
+    if [ "$rc" = "3" ]; then
+        printf '%s script guard: rewrite came back in Devanagari, using the raw transcript\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOGFILE" 2>/dev/null
+    elif [ "$rc" = "4" ]; then
+        printf '%s script guard: rewrite looks translated, using the raw transcript\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LOGFILE" 2>/dev/null
+    fi
 
     if [ -n "$out" ]; then
         printf '%s' "$out"
@@ -377,8 +713,13 @@ print(t)
 # ---------------------------------------------------------------- diagnostics
 
 cmd_config() {
-    local dir
+    local dir script
     dir=$(model_dir 2>/dev/null) || dir="(not downloaded yet)"
+    if [ "$WANT_ROMAN" = "1" ]; then
+        script="$SCRIPT (roman: Latin letters, not Devanagari)"
+    else
+        script="$SCRIPT (native script)"
+    fi
     cat <<EOF
 version     : $VOXTYPE_VERSION
 whisper     : $WHISPER_VARIANT
@@ -387,6 +728,7 @@ ollama url  : $OLLAMA_URL
 ollama model: $OLLAMA_MODEL
 timeout     : ${OLLAMA_TIMEOUT}s
 language    : ${LANGUAGE:-auto}
+script      : $script
 state dir   : $STATE_DIR
 EOF
 }
@@ -424,8 +766,12 @@ cmd_doctor() {
     echo
     echo "models"
 
-    if model_dir >/dev/null 2>&1; then
+    if model_complete; then
         check "whisper '$WHISPER_VARIANT'" ok ""
+    elif model_dir >/dev/null 2>&1; then
+        check "whisper '$WHISPER_VARIANT'" no \
+            "the download is incomplete. Remove $(model_dir) and run: voxtype warmup"
+        failures=$((failures + 1))
     else
         check "whisper '$WHISPER_VARIANT'" no "run: voxtype warmup"; failures=$((failures + 1))
     fi
@@ -435,6 +781,36 @@ cmd_doctor() {
     else
         check "ollama model '$OLLAMA_MODEL'" no "ollama pull $OLLAMA_MODEL"; failures=$((failures + 1))
     fi
+
+    echo
+    echo "language pairing"
+
+    # The derived defaults already get this right; these only fire when someone
+    # has pinned a model that cannot do the language they asked for. Worth
+    # saying out loud, because both failures are silent at dictation time.
+    if is_english; then
+        check "whisper matches language '$LANGUAGE'" ok ""
+    elif [ "$WHISPER_VARIANT" = "small.en" ] || [ "$WHISPER_VARIANT" = "base.en" ] \
+         || [ "$WHISPER_VARIANT" = "tiny.en" ] || [ "$WHISPER_VARIANT" = "medium.en" ]; then
+        check "whisper matches language '$LANGUAGE'" no \
+            "'$WHISPER_VARIANT' is English-only but the language is '$LANGUAGE'. Unset VOXTYPE_WHISPER_MODEL to get 'small', or pick a multilingual variant"
+        failures=$((failures + 1))
+    else
+        check "whisper matches language '$LANGUAGE'" ok ""
+    fi
+
+    case "$OLLAMA_MODEL" in
+        *1.5b|*0.5b|*1b|*1.5B)
+            if is_english; then
+                check "rewriter matches language '$LANGUAGE'" ok ""
+            else
+                check "rewriter matches language '$LANGUAGE'" no \
+                    "'$OLLAMA_MODEL' is small and was measured translating $LANGUAGE into English. Unset VOXTYPE_OLLAMA_MODEL to get 'qwen2.5:7b'"
+                failures=$((failures + 1))
+            fi
+            ;;
+        *) check "rewriter matches language '$LANGUAGE'" ok "" ;;
+    esac
 
     echo
     echo "hotkeys"
@@ -495,8 +871,13 @@ cmd_warmup() {
     echo "downloading whisper '$WHISPER_VARIANT' (this happens once)…"
     whisperkit-cli transcribe --model "$WHISPER_VARIANT" --audio-path "$wav" >/dev/null 2>&1
     rm -f "$wav"
-    if model_dir >/dev/null 2>&1; then
+    if model_complete; then
         echo "model ready at $(model_dir)"
+    elif model_dir >/dev/null 2>&1; then
+        # WhisperKit leaves a half-written directory behind when its download is
+        # interrupted, and a half-written directory looks exactly like a model
+        # until the first transcription fails with a CoreML load error.
+        die "the download is incomplete at $(model_dir) - remove that directory and run warmup again"
     else
         die "download did not produce a model directory"
     fi
@@ -574,6 +955,123 @@ PY
     fi
 }
 
+# Size and position of the Hammerspoon overlay. The module reads these from
+# ~/.cache/voxtype/overlay.conf, falling back to the environment and then to its
+# own defaults. It lives in a file rather than only the environment because
+# Hammerspoon is launched by launchd, so a new environment variable would need a
+# logout, while a conf file only needs Hammerspoon reloaded.
+OVERLAY_CONF="$STATE_DIR/overlay.conf"
+OVERLAY_KEYS="VOXTYPE_PILL_W VOXTYPE_PILL_H VOXTYPE_PILL_R VOXTYPE_WAVE_H VOXTYPE_BARS VOXTYPE_TEXT_DY"
+# The one setting that is a correction rather than a measurement, so a negative
+# value is the normal case for it and a positive one would be the surprise.
+OVERLAY_SIGNED=" VOXTYPE_TEXT_DY "
+
+# The full name, not the suffix, is what the module looks up, so accept both
+# 'PILL_H=52' and 'VOXTYPE_PILL_H=52' and reject anything else. Sets
+# _ov_key/_ov_val rather than echoing: called through $(...) it would run in a
+# subshell, and a die in there would only kill the substitution, not the command.
+overlay_normalise() {
+    local key="${1%%=*}" value="${1#*=}"
+    case "$key" in
+        VOXTYPE_*) ;;
+        *) key="VOXTYPE_$key" ;;
+    esac
+    # People type 'pill_h' and the module only knows the upper-case name.
+    key=$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')
+    case " $OVERLAY_KEYS " in
+        *" $key "*) ;;
+        *) die "unknown overlay setting '${key}'. Try: voxtype overlay" ;;
+    esac
+
+    # Check the whole value, not just its first character: a leading digit is
+    # not what makes something a number, and '12abc' would otherwise sail past.
+    local digits="${value#-}"
+    case "$digits" in
+        ''|*[!0-9.]*) die "overlay setting '${key}' wants a number, got '${value}'" ;;
+    esac
+    case "$OVERLAY_SIGNED" in
+        *" $key "*) ;;
+        *)
+            case "$value" in
+                -*) die "overlay setting '${key}' is a size, so '${value}' cannot be negative" ;;
+            esac
+            ;;
+    esac
+
+    _ov_key="$key"
+    _ov_val="$value"
+}
+
+cmd_overlay() {
+    local action="${1:-show}"
+    [ $# -gt 0 ] && shift
+
+    case "$action" in
+        show) ;;
+        set)
+            [ $# -gt 0 ] || die "nothing to set. Try: voxtype overlay set PILL_H=52 WAVE_H=46"
+            ;;
+        reset)
+            [ $# -eq 0 ] || die "voxtype overlay reset takes no arguments"
+            ;;
+        *)
+            die "voxtype overlay: try 'show', 'set KEY=VALUE' or 'reset'"
+            ;;
+    esac
+
+    if [ "$action" = "set" ]; then
+        # Validate the whole list before writing any of it, so a typo in the
+        # third pair does not leave the first two already applied.
+        local pair
+        for pair in "$@"; do overlay_normalise "$pair"; done
+
+        mkdir -p "$STATE_DIR"
+        for pair in "$@"; do
+            overlay_normalise "$pair"
+            if grep -q "^$_ov_key=" "$OVERLAY_CONF" 2>/dev/null; then
+                # -i for BSD sed, which macOS still ships
+                sed -i '' "s|^$_ov_key=.*|$_ov_key=$_ov_val|" "$OVERLAY_CONF"
+            else
+                printf '%s=%s\n' "$_ov_key" "$_ov_val" >> "$OVERLAY_CONF"
+            fi
+        done
+    elif [ "$action" = "reset" ]; then
+        rm -f "$OVERLAY_CONF"
+    fi
+
+    # A new size is not live until Hammerspoon re-reads the module, so do that
+    # here rather than making it a separate step the user can forget.
+    if [ "$action" != "show" ]; then
+        if pgrep -x Hammerspoon >/dev/null 2>&1; then
+            osascript -e 'quit app "Hammerspoon"' >/dev/null 2>&1
+            sleep 1
+            open -a Hammerspoon
+            sleep 1
+            echo "reloaded Hammerspoon"
+        else
+            echo "Hammerspoon is not running, so the change applies next time it starts"
+        fi
+    fi
+
+    echo
+    echo "overlay settings (from $OVERLAY_CONF, then the environment, then defaults)"
+    printf '  %-22s %s\n' \
+        VOXTYPE_PILL_W  "${VOXTYPE_PILL_W:-360}" \
+        VOXTYPE_PILL_H  "${VOXTYPE_PILL_H:-52}" \
+        VOXTYPE_PILL_R  "${VOXTYPE_PILL_R:-26}" \
+        VOXTYPE_WAVE_H  "${VOXTYPE_WAVE_H:-36}" \
+        VOXTYPE_BARS    "${VOXTYPE_BARS:-24}" \
+        VOXTYPE_TEXT_DY "${VOXTYPE_TEXT_DY:--3}"
+    if [ -f "$OVERLAY_CONF" ]; then
+        echo
+        echo "  in $OVERLAY_CONF:"
+        sed 's/^/    /' "$OVERLAY_CONF"
+    else
+        echo
+        echo "  no $OVERLAY_CONF, so all defaults"
+    fi
+}
+
 cmd_help() {
     cat <<EOF
 voxtype $VOXTYPE_VERSION - hold-to-talk voice typing for macOS
@@ -593,6 +1091,7 @@ usage: voxtype <command>
   install-hint  print the two macOS permission steps
   install-hammerspoon
                 (re)install the hotkey config
+  overlay         show or change the Hammerspoon overlay's size and look
   rewrite        clean a raw transcript read from stdin. Useful for tuning
                 VOXTYPE_OLLAMA_MODEL without recording anything.
   help          this text
@@ -603,14 +1102,27 @@ hotkeys (via Hammerspoon)
   ctrl+opt+R            restart recording
 
 environment
-  VOXTYPE_LANGUAGE        speech language, default en (empty = auto)
-  VOXTYPE_WHISPER_MODEL   whisper variant, default small.en
-  VOXTYPE_OLLAMA_MODEL    rewrite model, default qwen2.5:1.5b
+  VOXTYPE_LANGUAGE        speech language, default en (empty = auto-detect)
+  VOXTYPE_SCRIPT          roman or native, default auto. Roman keeps a
+                          non-Latin language in Latin letters (Hinglish)
+  VOXTYPE_WHISPER_MODEL   whisper variant, default follows VOXTYPE_LANGUAGE
+                          (small.en for English, small otherwise)
+  VOXTYPE_OLLAMA_MODEL    rewrite model, default follows VOXTYPE_LANGUAGE
+                          (qwen2.5:1.5b for English, qwen2.5:7b otherwise)
   VOXTYPE_OLLAMA_URL      ollama endpoint, default http://localhost:11434/api/generate
   VOXTYPE_OLLAMA_TIMEOUT  rewrite timeout in seconds, default 90
   VOXTYPE_MODEL_DIR       override the discovered whisper model directory
   VOXTYPE_NO_PASTE        set to 1 to print instead of pasting
   VOXTYPE_STATE_DIR       runtime state, default ~/.cache/voxtype
+
+overlay size and look
+  Read from ~/.cache/voxtype/overlay.conf, or from the environment. The overlay
+  is drawn by Hammerspoon, which launchd starts with a fixed environment, so
+  the conf file is the one you can actually change without logging out.
+
+    voxtype overlay                        show the settings in effect
+    voxtype overlay set PILL_H=52 WAVE_H=46 restart Hammerspoon
+    voxtype overlay reset                  go back to the defaults
 EOF
 }
 
@@ -619,18 +1131,35 @@ EOF
 case "${1:-help}" in
     start)            cmd_start ;;
     stop)             cmd_stop ;;
-    hotkey)           cmd_hotkey ;;
+    # These three are the ones Hammerspoon fires without waiting, so they are the
+    # ones that can overlap. The lock is taken here rather than inside each
+    # command because restart legitimately calls cancel and start, and a second
+    # mkdir from the same process would lock it out of itself.
+    hotkey)
+        acquire_lock || exit 0
+        trap release_lock EXIT INT TERM
+        cmd_hotkey
+        ;;
+    cancel)
+        acquire_lock || exit 0
+        trap release_lock EXIT INT TERM
+        cmd_cancel
+        ;;
+    restart)
+        acquire_lock || exit 0
+        trap release_lock EXIT INT TERM
+        cmd_restart
+        ;;
     toggle)
         if is_recording; then cmd_stop; else cmd_start; fi
         ;;
-    cancel)           cmd_cancel ;;
-    restart)          cmd_restart ;;
     status)           cmd_status ;;
     config)           cmd_config ;;
     doctor)           cmd_doctor ;;
     warmup)           cmd_warmup ;;
     install-hint)     cmd_install_hint ;;
     install-hammerspoon) cmd_install_hammerspoon ;;
+    overlay)         shift; cmd_overlay "$@" ;;
     rewrite)
         reformat "$(strip_tags "$(cat)")"
         printf '\n'
